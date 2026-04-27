@@ -1,23 +1,24 @@
 --!strict
 -- TutorialController.client.lua
--- Client-side tutorial UX:
---   * A 3D floating arrow above the player pointing at the current objective.
---   * Highlight + BillboardGui on the current objective.
---   * An objective callout banner near the top of the screen.
---   * A Skip button in the top-right (Red Zone — passive, requires
---     deliberate reach, so it can't be hit mid-jump).
---   * When tutorial enters Step2_Glide_InAir, force-start glide via
---     _G.SYLS_StartGlide.
 --
--- UI rationale: the skip button explicitly does NOT sit in any Green Zone.
--- Placing a destructive / commit-style action next to the jump input causes
--- accidental taps during high-frustration moments (the exact pattern the
--- doc warns about for Skip Stage buttons — misclick = broken trust).
+-- Floating-island tutorial UX. Entirely custom 3D arrow + screen prompt
+-- (no more WedgePart / objective billboard from the old tutorial). Three
+-- states sent by the server:
+--
+--   Greet  → 2-second welcome prompt centered on screen
+--   Glide  → big "STEP OFF & PRESS F TO GLIDE" prompt, plus a 3D arrow
+--            hovering above the launch edge of the floating island
+--   Done   → all tutorial UI / arrow torn down
+--
+-- The 3D arrow is built from primitives (cone-tip cylinder + shaft
+-- cylinder), so no external assets to fail to load. It bobs up-and-down
+-- with a sine wave and gently spins so it reads as motion-attentive.
 
-local Players = game:GetService("Players")
+local Players   = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
-local Workspace = game:GetService("Workspace")
+local TweenService = game:GetService("TweenService")
+local Workspace  = game:GetService("Workspace")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Remotes = require(Shared:WaitForChild("Remotes"))
@@ -27,61 +28,55 @@ local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
 
 local currentState: string? = nil
-local currentObjective: Vector3? = nil
 
 ------------------------------------------------------------
--- Single ScreenGui for all tutorial chrome (so the engine can batch
--- the static elements together).
+-- Single ScreenGui for tutorial chrome
 ------------------------------------------------------------
 local screen = UI.newScreenGui("Tutorial", playerGui)
 
 ------------------------------------------------------------
--- Objective banner (top-center, below the HUD stats strip).
--- Passive info — Red Zone. Compact for phones.
+-- Big centered prompt panel — the main "what to do" instruction.
+-- Top-center, well above the player's character (which sits in the
+-- lower-middle of the screen during normal play).
 ------------------------------------------------------------
-local banner = UI.newPanel("ObjectiveBanner")
-banner.AnchorPoint = Vector2.new(0.5, 0)
-banner.Position = UDim2.new(0.5, 0, 0, UI.Size.Margin + 46)
-banner.Size = UDim2.new(0, 260, 0, 40)
-banner.BackgroundColor3 = UI.Colors.Surface
-banner.BackgroundTransparency = 0.15
-banner.Visible = false
-banner.Parent = screen
+local prompt = UI.newPanel("TutorialPrompt")
+prompt.AnchorPoint = Vector2.new(0.5, 0)
+prompt.Position = UDim2.new(0.5, 0, 0, UI.Size.Margin + 84)
+prompt.Size = UDim2.new(0, 380, 0, 90)
+prompt.BackgroundColor3 = Color3.fromRGB(20, 30, 45)
+prompt.BackgroundTransparency = 0.05
+prompt.Visible = false
+prompt.Parent = screen
 
--- Accent stroke colour swapped to tutorial gold.
-local bannerStroke = banner:FindFirstChildWhichIsA("UIStroke") :: UIStroke
-bannerStroke.Color = UI.Colors.Coin
-bannerStroke.Transparency = 0.2
-bannerStroke.Thickness = 1
+local promptStroke = prompt:FindFirstChildWhichIsA("UIStroke") :: UIStroke
+promptStroke.Color = Color3.fromRGB(255, 215, 70)
+promptStroke.Thickness = 3
+promptStroke.Transparency = 0
 
-UI.addPadding(banner, 6)
+UI.addPadding(prompt, 10)
 
-local bannerCaption = UI.newLabel("TUTORIAL", UI.TextSize.Micro, UI.Colors.Coin)
-bannerCaption.Size = UDim2.new(1, 0, 0, 12)
-bannerCaption.TextXAlignment = Enum.TextXAlignment.Center
-bannerCaption.Parent = banner
+local promptCaption = UI.newLabel("TUTORIAL", UI.TextSize.Micro, Color3.fromRGB(255, 215, 70))
+promptCaption.Size = UDim2.new(1, 0, 0, 14)
+promptCaption.TextXAlignment = Enum.TextXAlignment.Center
+promptCaption.Parent = prompt
 
-local bannerObjective = UI.newLabel("", UI.TextSize.Body, UI.Colors.TextPrimary)
-bannerObjective.Size = UDim2.new(1, 0, 1, -14)
-bannerObjective.Position = UDim2.new(0, 0, 0, 14)
-bannerObjective.TextXAlignment = Enum.TextXAlignment.Center
-bannerObjective.Font = UI.Font.Black
-bannerObjective.Parent = banner
+local promptTitle = UI.newLabel("", UI.TextSize.Heading, UI.Colors.TextPrimary)
+promptTitle.Size = UDim2.new(1, 0, 0, 28)
+promptTitle.Position = UDim2.new(0, 0, 0, 16)
+promptTitle.TextXAlignment = Enum.TextXAlignment.Center
+promptTitle.Font = UI.Font.Black
+promptTitle.Parent = prompt
+
+local promptHint = UI.newLabel("", UI.TextSize.Body, UI.Colors.TextMuted)
+promptHint.Size = UDim2.new(1, 0, 0, 24)
+promptHint.Position = UDim2.new(0, 0, 0, 46)
+promptHint.TextXAlignment = Enum.TextXAlignment.Center
+promptHint.Parent = prompt
 
 ------------------------------------------------------------
--- Skip button — middle-LEFT Yellow Zone (mid-screen vertical periphery).
--- Per the heatmap doc, Skip-Stage-style commit actions belong in the
--- middle-right OR middle-left Yellow Zone, explicitly NOT in any Green
--- Zone and NOT in the bottom thumb cluster — that placement causes
--- accidental taps during frustrated rapid jumping ("Accidental
--- Monetization"). We put it on the LEFT so it doesn't collide with the
--- Shop rail (which sits in the middle-RIGHT Yellow Zone).
--- Visual 96x36, hitbox 120x48 (Fitts's Law), slightly dimmed so it
--- doesn't compete with the objective banner.
+-- Skip button — middle-LEFT Yellow Zone, dim, deliberate reach to
+-- avoid mis-tap during high-action moments.
 ------------------------------------------------------------
--- Icon-only square button (44×44 visual, padded hitbox). The icon key
--- falls back to the "SKIP" word if the asset ID is ever missing from
--- Icons.lua, so the button stays meaningful no matter what.
 local skipOuter, skipInner = UI.newButton({
 	Text = "",
 	Color = UI.Colors.SurfaceSoft,
@@ -100,173 +95,159 @@ skipOuter.Parent = screen
 skipOuter.Activated:Connect(function()
 	Remotes.TutorialSkip:FireServer()
 end)
-
 skipInner.BackgroundTransparency = 0.2
 
 ------------------------------------------------------------
--- 3D floating arrow — a glowing wedge that hovers above the player
--- and points toward the current objective.
+-- 3D arrow — built from primitives so no asset dependency. A vertical
+-- yellow cylinder shaft topped with a wider, shorter cylinder tip
+-- pointing downward at whatever target the arrow is "anchored" to.
+-- Bobs up-and-down + spins gently around its Y axis.
 ------------------------------------------------------------
-local pointer = Instance.new("WedgePart")
-pointer.Name = "ArrowTip"
-pointer.Anchored = true
-pointer.CanCollide = false
-pointer.CanQuery = false
-pointer.CanTouch = false
-pointer.CastShadow = false
-pointer.Size = Vector3.new(4, 3, 5)
-pointer.Material = Enum.Material.Neon
-pointer.Color = Color3.fromRGB(255, 220, 60)
-pointer.Transparency = 0.1
-
-------------------------------------------------------------
--- Highlight + billboard on the current objective
-------------------------------------------------------------
-local currentObjectiveHighlight: Highlight? = nil
-local currentObjectiveBillboard: BillboardGui? = nil
-
-local function clearObjectiveMarkers()
-	if currentObjectiveHighlight then
-		currentObjectiveHighlight:Destroy()
-		currentObjectiveHighlight = nil
-	end
-	if currentObjectiveBillboard then
-		currentObjectiveBillboard:Destroy()
-		currentObjectiveBillboard = nil
-	end
-end
-
-local function findObjectivePart(state: string): BasePart?
-	local map = Workspace:FindFirstChild("Map")
-	if not map then return nil end
-	local cliff = map:FindFirstChild("PracticeCliff")
-	if not cliff then return nil end
-	if state == "Step1_GrabCoin" then
-		return cliff:FindFirstChild("TutorialCoin") :: BasePart?
-	elseif state == "Step2_Glide" then
-		return cliff:FindFirstChild("TutorialLedge") :: BasePart?
-	end
-	return nil
-end
-
-local function labelForState(state: string): string
-	if state == "Step1_GrabCoin" then return "Grab the glowing coin" end
-	if state == "Step2_Glide" then return "Step off the cliff to glide" end
-	return ""
-end
-
-local function updateObjectiveMarkers(state: string)
-	clearObjectiveMarkers()
-	local part = findObjectivePart(state)
-	if not part then return end
-
-	local hl = Instance.new("Highlight")
-	hl.FillColor = UI.Colors.Coin
-	hl.OutlineColor = Color3.fromRGB(255, 255, 255)
-	hl.FillTransparency = 0.7
-	hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-	hl.Parent = part
-	currentObjectiveHighlight = hl
-
-	local bb = Instance.new("BillboardGui")
-	bb.Adornee = part
-	bb.Size = UDim2.new(0, 160, 0, 32)
-	bb.StudsOffset = Vector3.new(0, 4, 0)
-	bb.AlwaysOnTop = true
-	bb.MaxDistance = 500
-	bb.Parent = part
-	currentObjectiveBillboard = bb
-
-	-- 3D callout: Frame backdrop + label. No ImageLabel / CanvasGroup used
-	-- so the billboard costs only primitive shader math.
-	local backdrop = Instance.new("Frame")
-	backdrop.Size = UDim2.new(1, 0, 1, 0)
-	backdrop.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
-	backdrop.BackgroundTransparency = 0.25
-	backdrop.BorderSizePixel = 0
-	local bc = Instance.new("UICorner"); bc.CornerRadius = UDim.new(0, 8); bc.Parent = backdrop
-	local bs = Instance.new("UIStroke"); bs.Color = UI.Colors.Coin; bs.Thickness = 2; bs.Parent = backdrop
-	backdrop.Parent = bb
-
-	local lbl = UI.newLabel(labelForState(state), UI.TextSize.Caption, UI.Colors.Coin)
-	lbl.Size = UDim2.new(1, -6, 1, 0)
-	lbl.Position = UDim2.new(0, 3, 0, 0)
-	lbl.TextXAlignment = Enum.TextXAlignment.Center
-	lbl.Font = UI.Font.Black
-	lbl.Parent = backdrop
-end
-
-------------------------------------------------------------
--- Arrow follow loop
-------------------------------------------------------------
+local arrowModel: Model? = nil
+local arrowTargetPos: Vector3? = nil
 local arrowConn: RBXScriptConnection? = nil
 
-local function startArrowFollow()
-	if arrowConn then return end
-	pointer.Parent = Workspace
-	arrowConn = RunService.RenderStepped:Connect(function()
-		local char = player.Character
-		if not char then return end
-		local hrp = char:FindFirstChild("HumanoidRootPart") :: BasePart?
-		if not hrp or not currentObjective then return end
+local function buildArrow(): Model
+	local model = Instance.new("Model")
+	model.Name = "TutorialArrow"
 
-		local objective = currentObjective
-		local anchor = hrp.Position + Vector3.new(0, 6, 0)
-		local dir = (objective - anchor)
-		local flat = Vector3.new(dir.X, 0, dir.Z)
-		if flat.Magnitude < 0.1 then flat = Vector3.new(0, 0, -1) end
-		flat = flat.Unit
-		pointer.CFrame = CFrame.lookAt(anchor + flat * 3, anchor + flat * 6) * CFrame.Angles(0, math.rad(180), 0)
+	-- Shaft: thick neon-yellow cylinder.
+	local shaft = Instance.new("Part")
+	shaft.Name = "Shaft"
+	shaft.Anchored = true
+	shaft.CanCollide = false
+	shaft.CanQuery = false
+	shaft.CanTouch = false
+	shaft.CastShadow = false
+	shaft.Shape = Enum.PartType.Cylinder
+	shaft.Material = Enum.Material.Neon
+	shaft.Color = Color3.fromRGB(255, 220, 60)
+	shaft.Size = Vector3.new(7, 2.4, 2.4)  -- 7 long, 2.4 diameter
+	shaft.Parent = model
+
+	-- Tip: stubby fat cone-ish cylinder pointing down.
+	local tip = Instance.new("Part")
+	tip.Name = "Tip"
+	tip.Anchored = true
+	tip.CanCollide = false
+	tip.CanQuery = false
+	tip.CanTouch = false
+	tip.CastShadow = false
+	tip.Shape = Enum.PartType.Cylinder
+	tip.Material = Enum.Material.Neon
+	tip.Color = Color3.fromRGB(255, 180, 30)
+	tip.Size = Vector3.new(3, 5, 5)
+	tip.Parent = model
+
+	-- Glow PointLight at the tip so it pops at distance.
+	local light = Instance.new("PointLight")
+	light.Color = Color3.fromRGB(255, 220, 90)
+	light.Range = 18
+	light.Brightness = 1.4
+	light.Parent = tip
+
+	model.PrimaryPart = shaft
+	return model
+end
+
+-- Re-anchors the arrow group above `targetPos`, tip aimed downward at
+-- the target. `t` is the elapsed time used for the bob+spin.
+local function updateArrow(model: Model, targetPos: Vector3, t: number)
+	local shaft = model:FindFirstChild("Shaft") :: BasePart?
+	local tip = model:FindFirstChild("Tip") :: BasePart?
+	if not shaft or not tip then return end
+
+	-- Bob 1.5 studs up/down on a 1.6s sine wave.
+	local bobOffset = math.sin(t * (math.pi * 2 / 1.6)) * 1.5
+	-- Anchor the arrow so the tip's bottom edge sits ~6 studs above the
+	-- target; the shaft sits above the tip with a tiny gap.
+	local tipCenter = targetPos + Vector3.new(0, 9 + bobOffset, 0)
+	local shaftCenter = tipCenter + Vector3.new(0, 5.5, 0)  -- 2.5 (half tip) + 0.5 + 3.5 (half shaft)
+
+	-- Tip rotated so its long axis (+X local) points DOWN.
+	tip.CFrame = CFrame.new(tipCenter) * CFrame.Angles(0, 0, math.rad(90))
+	-- Shaft is vertical, also rotated so +X is up.
+	shaft.CFrame = CFrame.new(shaftCenter) * CFrame.Angles(0, 0, math.rad(90))
+end
+
+local function destroyArrow()
+	if arrowConn then arrowConn:Disconnect(); arrowConn = nil end
+	if arrowModel then arrowModel:Destroy(); arrowModel = nil end
+	arrowTargetPos = nil
+end
+
+local function spawnArrowAtLaunchEdge()
+	destroyArrow()
+	-- Find the launch-edge target in world space.
+	local map = Workspace:FindFirstChild("Map")
+	if not map then return end
+	local island = map:FindFirstChild("TutorialIsland")
+	if not island then return end
+	local launchEdge = island:FindFirstChild("LaunchEdge") :: BasePart?
+	if not launchEdge then return end
+
+	arrowTargetPos = launchEdge.Position
+	arrowModel = buildArrow()
+	arrowModel.Parent = Workspace
+
+	local startTime = os.clock()
+	arrowConn = RunService.RenderStepped:Connect(function()
+		if arrowModel and arrowTargetPos then
+			updateArrow(arrowModel, arrowTargetPos, os.clock() - startTime)
+		end
 	end)
 end
 
-local function stopArrowFollow()
-	if arrowConn then arrowConn:Disconnect() arrowConn = nil end
-	pointer.Parent = nil
+------------------------------------------------------------
+-- Prompt copy per state
+------------------------------------------------------------
+local function setPromptForState(state: string)
+	if state == "Greet" then
+		promptCaption.Text = "WELCOME"
+		promptTitle.Text = "Stretch Your Limbs!"
+		promptHint.Text = "You're on a floating island. Glide to reach the tree!"
+		prompt.Visible = true
+		skipOuter.Visible = true
+	elseif state == "Glide" then
+		promptCaption.Text = "STEP 1 / 1"
+		promptTitle.Text = "Step off & press F"
+		promptHint.Text = (UI.isTouch() and "Walk off the edge → tap GLIDE!" or "Walk off the edge → press F to glide!")
+		prompt.Visible = true
+		skipOuter.Visible = true
+	elseif state == "Done" then
+		prompt.Visible = false
+		skipOuter.Visible = false
+		destroyArrow()
+	end
 end
 
 ------------------------------------------------------------
--- State transitions
+-- Server → client state transitions
 ------------------------------------------------------------
-Remotes.TutorialState.OnClientEvent:Connect(function(state: string, objective: Vector3?)
+Remotes.TutorialState.OnClientEvent:Connect(function(state: string)
 	currentState = state
-	currentObjective = objective
+	setPromptForState(state)
 
-	if state == "Done" then
-		stopArrowFollow()
-		clearObjectiveMarkers()
-		skipOuter.Visible = false
-		banner.Visible = false
-		return
+	if state == "Greet" then
+		-- Don't spawn the arrow yet — let the welcome breathe.
+		destroyArrow()
+	elseif state == "Glide" then
+		-- Now show the arrow at the launch edge.
+		spawnArrowAtLaunchEdge()
+	elseif state == "Done" then
+		destroyArrow()
 	end
-
-	skipOuter.Visible = true
-
-	if state == "Step2_Glide_InAir" then
-		-- Server is waiting for us to land. Trigger auto-glide.
-		clearObjectiveMarkers()
-		stopArrowFollow()
-		bannerObjective.Text = "Gliding!"
-		banner.Visible = true
-		if _G.SYLS_StartGlide then
-			_G.SYLS_StartGlide()
-		end
-		return
-	end
-
-	-- Normal visible step: banner + arrow + highlight.
-	bannerObjective.Text = labelForState(state)
-	banner.Visible = true
-	startArrowFollow()
-	updateObjectiveMarkers(state)
 end)
 
--- If the character respawns mid-tutorial, re-apply markers to the right step.
+-- Re-apply the arrow / prompt if the player respawns mid-tutorial.
 player.CharacterAdded:Connect(function()
-	if currentState and currentState ~= "Done" and currentState ~= "Step2_Glide_InAir" then
-		task.wait(0.5)
-		updateObjectiveMarkers(currentState)
+	if currentState and currentState ~= "Done" then
+		task.wait(0.4)
+		setPromptForState(currentState)
+		if currentState == "Glide" then
+			spawnArrowAtLaunchEdge()
+		end
 	end
 end)
 
-print("[TutorialController] Ready. Waiting for tutorial state from server.")
+print("[TutorialController] Floating-island tutorial UI ready.")

@@ -16,6 +16,7 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Config = require(Shared:WaitForChild("Config"))
 local Remotes = require(Shared:WaitForChild("Remotes"))
 local Util = require(Shared:WaitForChild("Util"))
 local UI = require(Shared:WaitForChild("UI"))
@@ -111,7 +112,11 @@ local function makeStatPair(captionText: string, iconKey: string?, order: number
 end
 
 local _, rebirthsValue = makeStatPair("REBIRTHS", "Rebirth", 1)
-local _, bestGlideValue = makeStatPair("BEST", "BestGlide", 2)
+-- BEST is the player's best single glide expressed in COINS (not studs).
+-- The internal record is still BestGlideDistance; we multiply by
+-- CoinsPerStud at display time so the number matches the same currency
+-- the coin chip shows. Icon is the Coin asset for the same reason.
+local _, bestGlideValue = makeStatPair("BEST", "Coin", 2)
 
 -- Slide-fade-in entrance for both top chips on first appearance.
 UI.attachAppearFx(coinsChip, { fromYOffset = -10, duration = 0.28 })
@@ -204,7 +209,13 @@ local function applyProfile(profile: any)
 		end)
 	end
 	rebirthsValue.Text = tostring(profile.Rebirths or 0)
-	bestGlideValue.Text = Util.formatNumber(profile.BestGlideDistance or 0) .. " studs"
+	-- Display BEST as base coins earned (distance × CoinsPerStud), so the
+	-- player sees a number in the same units as their coin balance.
+	-- Multipliers (rebirth, pet) are NOT applied here — this is the
+	-- baseline "what a record-breaking glide is worth" reading.
+	local bestDistance = profile.BestGlideDistance or 0
+	local bestCoins = math.floor(bestDistance * Config.Glide.CoinsPerStud)
+	bestGlideValue.Text = Util.formatNumber(bestCoins)
 end
 
 Remotes.DataUpdated.OnClientEvent:Connect(applyProfile)

@@ -42,11 +42,13 @@ local screen = UI.newScreenGui("ShopUI", playerGui)
 -- jump thumb cluster, so rapid jumping can't accidentally open the shop
 -- or (critically) trigger rebirth.
 ------------------------------------------------------------
+-- Rail container scales with the button size. 88-wide buttons + 6px
+-- gutter × 2 gaps = 276; round to 280 for breathing room.
 local rail = Instance.new("Frame")
 rail.Name = "Rail"
 rail.AnchorPoint = Vector2.new(1, 0.5)
 rail.Position = UDim2.new(1, -UI.Size.Margin, 0.5, 0)
-rail.Size = UDim2.new(0, 44, 0, 156)
+rail.Size = UDim2.new(0, 88, 0, 280)
 rail.BackgroundTransparency = 1
 rail.Parent = screen
 

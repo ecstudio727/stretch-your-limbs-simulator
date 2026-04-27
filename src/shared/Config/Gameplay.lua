@@ -101,19 +101,22 @@ Gameplay.Leaderboard = {
 ------------------------------------------------------------
 Gameplay.Tutorial = {
 	States = {
-		"Step1_GrabCoin",     -- walk to the glowing coin on the cliff plateau
-		"Step2_Glide",        -- step off the west edge, auto-glide to the tree
+		"Greet",              -- 2-second welcome banner on the floating island
+		"Glide",              -- step off the western edge AND press F to glide
 		"Done",
 	},
 	-- ForceField is applied during tutorial to prevent death-frustration.
 	GrantStarterCoinsOnComplete = 10,
+	GreetDuration = 2,            -- seconds to display the welcome banner
+	FallRecoveryY = 5,            -- if a tutorial player drops below this Y,
+	                              -- teleport them back to the floating island
 }
 
 ------------------------------------------------------------
 -- DATA
 ------------------------------------------------------------
 Gameplay.Data = {
-	DataStoreName = "PlayerData_v3", -- bump invalidates old saves so the rewritten tutorial always runs for testers
+	DataStoreName = "PlayerData_v4", -- bumped for the floating-island tutorial rewrite
 	AutoSaveSeconds = 120,
 	Default = {
 		Coins = 0,

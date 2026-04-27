@@ -115,7 +115,7 @@ distTitle.Size = UDim2.new(1, 0, 0, 12)
 distTitle.TextXAlignment = Enum.TextXAlignment.Center
 distTitle.Parent = distCard
 
-local distValue = UI.newLabel("0 studs", UI.TextSize.Heading, UI.Colors.TextPrimary)
+local distValue = UI.newLabel("0 coins", UI.TextSize.Heading, UI.Colors.TextPrimary)
 distValue.Size = UDim2.new(1, 0, 1, -14)
 distValue.Position = UDim2.new(0, 0, 0, 14)
 distValue.TextXAlignment = Enum.TextXAlignment.Center
@@ -125,7 +125,7 @@ local distScale = Instance.new("UIScale")
 distScale.Scale = 1
 distScale.Parent = distValue
 
--- Milestone burst plays the "+100 STUDS!" punch animation.
+-- Milestone burst plays the "+100 COINS!" punch animation.
 -- Pure-Frame + TextLabel + UIScale — no ImageLabel / CanvasGroup, so
 -- no asset fetch, no VRAM overhead.
 local function playMilestoneBurst(threshold: number)
@@ -157,9 +157,9 @@ local function playMilestoneBurst(threshold: number)
 		if distStroke.Parent then distStroke.Color = origStrokeColor end
 	end)
 
-	-- Floating "+N STUDS!" label rising above the distance card.
+	-- Floating "+N COINS!" label rising above the distance card.
 	if UI.isReducedMotion() then return end  -- skip floater for motion-sensitive users
-	local burst = UI.newLabel(threshold .. " STUDS!", UI.TextSize.Body, UI.Colors.Coin)
+	local burst = UI.newLabel(threshold .. " COINS!", UI.TextSize.Body, UI.Colors.Coin)
 	burst.AnchorPoint = Vector2.new(0.5, 0.5)
 	burst.Position = UDim2.new(0.5, 0, 0, UI.Size.Margin + 46 + 86)
 	burst.Size = UDim2.new(0, 220, 0, 28)
@@ -194,7 +194,7 @@ local function startGlide(_force: boolean?)
 	state.gliding = true
 	state.glideStartPos = hrp.Position
 	state.lastMilestone = 0
-	distValue.Text = "0 studs"
+	distValue.Text = "0 coins"
 	distScale.Scale = 1
 	distCard.Visible = true
 	Remotes.GlideStarted:FireServer()
@@ -238,14 +238,19 @@ local function startGlide(_force: boolean?)
 		look = look.Unit
 		lv.VectorVelocity = Vector3.new(look.X * forwardSpeed, -fallSpeed, look.Z * forwardSpeed)
 
-		-- Live distance readout + per-100-stud milestone burst.
+		-- Live coin readout + per-100-stud milestone burst. The trigger
+		-- cadence stays "every 100 distance studs" (well-tuned ~3-4 sec
+		-- intervals at level 0) but both the live readout and the burst
+		-- label show the actual coin amount the player is earning, to
+		-- stay consistent with the BEST stat in HUD.
 		if state.glideStartPos then
 			local dist = math.floor(Util.horizontalDistance(state.glideStartPos, root.Position))
-			distValue.Text = dist .. " studs"
+			local coins = math.floor(dist * Config.Glide.CoinsPerStud)
+			distValue.Text = coins .. " coins"
 			local milestone = math.floor(dist / 100)
 			if milestone > state.lastMilestone then
 				state.lastMilestone = milestone
-				playMilestoneBurst(milestone * 100)
+				playMilestoneBurst(math.floor(milestone * 100 * Config.Glide.CoinsPerStud))
 			end
 		end
 
@@ -321,56 +326,49 @@ UserInputService.InputBegan:Connect(function(input, processed)
 end)
 
 ------------------------------------------------------------
--- On-screen GLIDE button.
+-- On-screen GLIDE button — big 3D candy square anchored bottom-center.
 --
--- GLIDE is a split-second reaction action — per the heatmap doc, those
--- belong in the GREEN ZONE. The bottom-right Green Zone is owned by the
--- native Roblox jump button, so we anchor the GLIDE button DIRECTLY
--- ADJACENT to it (~24 px to its left), which is the exact pattern the
--- doc recommends: "fetch the absolute position of the native jump button
--- and create custom buttons twenty to seventy pixels adjacent to it".
--- The native jump button on mobile is ~70 px wide and sits ~20 px from
--- the bottom-right corner, so our visible glide button lands in a place
--- the thumb can flick to without regripping.
+-- Style is lifted from flip-a-coin-for-brainrots' FLIP button: lifted
+-- shadow + shine highlight + stud texture + click burst, FredokaOne text.
+-- The button itself lives in shared/UI.lua as UI.new3DButton so other
+-- screens can reuse it.
 --
--- Visual 64x64 circular button, 96x96 invisible hitbox so off-center
--- panicked taps still register (Fitts's Law).
+-- Sized so it dominates the bottom of the screen (it's THE main game
+-- action). On desktop 160×160, on mobile 120×120 — both well above the
+-- 44×44 hitbox minimum and big enough to thumb-tap without aiming.
 ------------------------------------------------------------
-local JUMP_BTN_EST_WIDTH = 70   -- Roblox native jump button (mobile)
-local JUMP_BTN_EST_RIGHT = 20   -- distance from screen right edge
-local JUMP_BTN_EST_BOTTOM = 20  -- distance from screen bottom edge
-local GLIDE_JUMP_GAP = 24       -- gap so the two buttons don't collide
+local glideIsMobile = UI.isTouch()
+-- Wide rectangle, matching the proportions of the FLIP button reference
+-- (~3:1 width:height) but a touch chunkier so it dominates the bottom.
+local GLIDE_BTN_W = glideIsMobile and 220 or 320
+local GLIDE_BTN_H = glideIsMobile and 72  or 100
+local GLIDE_BTN_BOTTOM_MARGIN = glideIsMobile and 16 or 28
 
-local glideBtnOuter, glideBtnInner = UI.newButton({
+-- State color palettes. Shadow is a darker shade of the top so the
+-- "lifted" silhouette stays consistent on every state swap.
+local GLIDE_COLORS = {
+	ready = { top = Color3.fromRGB(40, 200, 40),  bottom = Color3.fromRGB(20, 140, 20) },  -- green = airborne, can glide
+	active = { top = Color3.fromRGB(255, 140, 50), bottom = Color3.fromRGB(180, 80, 20) }, -- orange = currently gliding
+	idle = { top = Color3.fromRGB(120, 125, 130), bottom = Color3.fromRGB(70, 75, 80) },   -- grey = grounded, unavailable
+}
+
+local glideBtn, glideContainer, glideShadow = UI.new3DButton({
+	Parent = screen,
 	Text = "GLIDE",
-	Color = UI.Colors.Glide,
-	TextColor = UI.Colors.TextPrimary,
-	Visual = Vector2.new(64, 64),
-	Hitbox = Vector2.new(96, 96),
-	TextSize = UI.TextSize.Caption,
-	Font = UI.Font.Black,
+	Size = UDim2.new(0, GLIDE_BTN_W, 0, GLIDE_BTN_H),
+	-- Bottom-center, lifted off the screen edge so the press-down anim
+	-- has room to drop without clipping the bottom.
+	Position = UDim2.new(0.5, 0, 1, -GLIDE_BTN_BOTTOM_MARGIN),
+	AnchorPoint = Vector2.new(0.5, 1),
+	TopColor = GLIDE_COLORS.ready.top,
+	BottomColor = GLIDE_COLORS.ready.bottom,
+	Mobile = glideIsMobile,
 })
-glideBtnOuter.AnchorPoint = Vector2.new(1, 1)
--- Anchor to bottom-right, then push LEFT by (native jump width + right
--- margin + our gap) so we sit just to the left of the native jump button.
-glideBtnOuter.Position = UDim2.new(
-	1, -(JUMP_BTN_EST_RIGHT + JUMP_BTN_EST_WIDTH + GLIDE_JUMP_GAP),
-	1, -JUMP_BTN_EST_BOTTOM
-)
-glideBtnOuter.Parent = screen
-glideBtnOuter.Activated:Connect(tryActivateGlide)
+glideBtn.Activated:Connect(tryActivateGlide)
 
--- Make the visual a circle so it reads distinctly from the square native
--- jump button next to it.
-local glideInnerCorner = glideBtnInner:FindFirstChildWhichIsA("UICorner")
-if glideInnerCorner then glideInnerCorner.CornerRadius = UDim.new(1, 0) end
-
--- Find the inner label so we can retheme it by state.
-local glideBtnLabel = glideBtnInner:FindFirstChildWhichIsA("TextLabel")
-
--- Visual state: bright when airborne & available, orange when active, dim
--- when grounded. Runs on RenderStepped but only mutates properties when the
--- state actually changes, so the engine can still skip most frames.
+-- Visual state: green when airborne & available, orange when active,
+-- grey when grounded. RenderStepped fires every frame but we only mutate
+-- properties on actual state transitions, so the engine still skips most.
 local lastBtnState = ""
 RunService.RenderStepped:Connect(function()
 	local char = player.Character
@@ -385,16 +383,10 @@ RunService.RenderStepped:Connect(function()
 	if s == lastBtnState then return end
 	lastBtnState = s
 
-	if s == "active" then
-		glideBtnInner.BackgroundColor3 = Color3.fromRGB(230, 140, 60)
-		if glideBtnLabel then glideBtnLabel.Text = "STOP" end
-	elseif s == "ready" then
-		glideBtnInner.BackgroundColor3 = UI.Colors.Glide
-		if glideBtnLabel then glideBtnLabel.Text = "GLIDE" end
-	else
-		glideBtnInner.BackgroundColor3 = UI.Colors.Disabled
-		if glideBtnLabel then glideBtnLabel.Text = "GLIDE" end
-	end
+	local palette = GLIDE_COLORS[s]
+	glideBtn.BackgroundColor3 = palette.top
+	glideShadow.BackgroundColor3 = palette.bottom
+	glideBtn.Text = (s == "active") and "STOP" or "GLIDE"
 end)
 
 player.CharacterAdded:Connect(function()

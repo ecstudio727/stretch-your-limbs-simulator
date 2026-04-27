@@ -1,18 +1,28 @@
 --!strict
 -- TutorialService.lua
--- Server-side FSM that guides a first-time player through a short practice run:
---   Step1_GrabCoin    -> walk to the coin on the cliff pedestal, touch it
---   Step2_Glide       -> walk off the west edge (TutorialLedgeEdge trigger)
---   Step2_Glide_InAir -> client auto-starts glide, we wait for landing
---   Done              -> teleport to the tree base, remove ForceField, persist flag
 --
--- The tutorial happens on a physical cliff plateau to the east of the tree.
--- Stepping off the edge sends the player on a short auto-glide that deposits
--- them on a wide grass landing strip at the tree base. A ForceField is on the
--- whole time so the player can't die from falling.
+-- Floating-island tutorial. First-join players spawn on a sky island east
+-- of the tree, see a quick prompt, and reach the main island however they
+-- want — glide, fall, die-and-respawn — all paths complete the tutorial.
+--
+-- Owen's call: NO BOUNDARIES. No ForceField, no fall-recovery teleport,
+-- no strict "must have glided" check on landing. The tutorial just gates
+-- the HasCompletedTutorial flag + starter-coin grant; it doesn't try to
+-- trap or restrict the player.
+--
+-- FSM states (server-authoritative):
+--   Greet  → 2-second welcome banner on the floating island
+--   Glide  → "step off & press F" prompt + 3D arrow at launch edge
+--   Done   → any touch of MainIslandLanding completes; +10 starter coins
+--
+-- If the player falls into the void instead of gliding, FallenPartsDestroyHeight
+-- kills them and they respawn at the main SpawnLocation — which is on top
+-- of the main island, so MainIslandLanding's touch sensor naturally fires
+-- on respawn and the tutorial completes anyway. No special handling needed.
 
 local Players   = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
+local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
@@ -21,87 +31,73 @@ local Remotes = require(Shared:WaitForChild("Remotes"))
 
 local TutorialService = {}
 
--- Per-player tutorial state: { state = string, forceField = ForceField? }
-local playerStates: { [Player]: any } = {}
+-- Per-player tutorial state.
+type StateInfo = {
+	state: string,
+	forceField: ForceField?,
+	finished: boolean,
+}
+local playerStates: { [Player]: StateInfo } = {}
 
 local function getMap(): Folder
 	return Workspace:WaitForChild("Map") :: Folder
 end
 
-local function getObjectivePosition(state: string): Vector3?
+local function getIslandTopPart(): BasePart?
 	local map = getMap()
-	local cliff = map:FindFirstChild("PracticeCliff")
-	if not cliff then return nil end
-	if state == "Step1_GrabCoin" then
-		local coin = cliff:FindFirstChild("TutorialCoin")
-		return coin and (coin :: BasePart).Position or nil
-	elseif state == "Step2_Glide" then
-		local ledge = cliff:FindFirstChild("TutorialLedge")
-		return ledge and (ledge :: BasePart).Position or nil
-	end
-	return nil
+	local island = map:FindFirstChild("TutorialIsland")
+	return island and (island :: Folder):FindFirstChild("IslandTop") :: BasePart?
 end
 
 local function pushState(player: Player, state: string)
 	local info = playerStates[player]
-	if not info then return end
+	if not info or info.finished then return end
 	info.state = state
-	Remotes.TutorialState:FireClient(player, state, getObjectivePosition(state))
+	Remotes.TutorialState:FireClient(player, state, nil)
 end
 
-local function applyForceField(player: Player)
+-- ForceField helpers retained but unused — Owen wants no boundaries
+-- during tutorial, including no invincibility. Calls to applyForceField
+-- have been removed below. Functions kept as no-ops so we don't have to
+-- audit every reference if we ever want them back.
+local function applyForceField(_player: Player)
+	-- intentionally no-op: tutorial has no ForceField protection.
+end
+
+local function removeForceField(player: Player)
+	-- Defensive: still strip any ForceField attached to the character,
+	-- in case one was left over from a previous codepath.
 	local char = player.Character
 	if not char then return end
 	for _, child in ipairs(char:GetChildren()) do
 		if child:IsA("ForceField") then child:Destroy() end
 	end
-	local ff = Instance.new("ForceField")
-	ff.Visible = false
-	ff.Parent = char
-	local info = playerStates[player]
-	if info then info.forceField = ff end
 end
 
-local function removeForceField(player: Player)
-	local info = playerStates[player]
-	if info and info.forceField then
-		info.forceField:Destroy()
-		info.forceField = nil
-	end
-	local char = player.Character
-	if char then
-		for _, child in ipairs(char:GetChildren()) do
-			if child:IsA("ForceField") then child:Destroy() end
-		end
-	end
-end
-
--- Teleport the player onto the cliff plateau, facing westward toward the tree.
-local function teleportToPracticeCliff(player: Player)
+-- Place the player on top of the floating island, facing west toward
+-- the main world (so walking forward steps off the launch edge).
+local function teleportToIsland(player: Player)
 	local char = player.Character
 	if not char then return end
 	local hrp = char:FindFirstChild("HumanoidRootPart") :: BasePart?
 	if not hrp then return end
-	local map = getMap()
-	local cliff = map:FindFirstChild("PracticeCliff")
-	if not cliff then return end
-	local pedestal = cliff:FindFirstChild("TutorialPedestal") :: BasePart?
-	if not pedestal then return end
 
-	-- Spawn east of the pedestal, looking west toward the tree so the player
-	-- naturally walks toward the coin, then the cliff edge.
-	local spawnPos = pedestal.Position + Vector3.new(12, 4, 0)
-	local look = Vector3.new(-1, 0, 0)
-	hrp.CFrame = CFrame.lookAt(spawnPos, spawnPos + look)
+	local islandTop = getIslandTopPart()
+	if not islandTop then return end
+
+	-- Stand on the island's eastern half so they have room to walk west.
+	local spawnPos = islandTop.Position + Vector3.new(8, 4, 0)
+	local lookTarget = spawnPos + Vector3.new(-1, 0, 0)  -- face west
+	hrp.CFrame = CFrame.lookAt(spawnPos, lookTarget)
 end
 
-local function teleportToTreeBase(player: Player)
+-- After tutorial completes, drop the player at the regular spawn pad.
+local function teleportToSpawn(player: Player)
 	local char = player.Character
 	if not char then return end
 	local hrp = char:FindFirstChild("HumanoidRootPart") :: BasePart?
 	if not hrp then return end
-	local map = getMap()
-	local spawnPad = map:FindFirstChild("SpawnPad") :: BasePart?
+	local spawnPad = getMap():FindFirstChild("SpawnPad") :: BasePart?
 	if spawnPad then
 		hrp.CFrame = CFrame.new(spawnPad.Position + Vector3.new(0, 5, 0))
 	end
@@ -109,90 +105,61 @@ end
 
 local function finishTutorial(player: Player, deps: any)
 	local info = playerStates[player]
-	if not info then return end
-	if info.state == "Done" then return end
+	if not info or info.finished then return end
+	info.finished = true
 	info.state = "Done"
 
 	removeForceField(player)
 
 	deps.PlayerDataService.update(player, function(p)
 		p.HasCompletedTutorial = true
-		p.Coins += Config.Tutorial.GrantStarterCoinsOnComplete
+		p.Coins = (p.Coins or 0) + Config.Tutorial.GrantStarterCoinsOnComplete
 	end)
 
 	Remotes.TutorialState:FireClient(player, "Done", nil)
 	Remotes.Notify:FireClient(player, "Tutorial complete! +" .. Config.Tutorial.GrantStarterCoinsOnComplete .. " coins.")
 
-	teleportToTreeBase(player)
+	teleportToSpawn(player)
 end
 
 ------------------------------------------------------------
--- Hazard wiring for tutorial-specific parts
+-- Wire the in-world tutorial parts (MainIslandLanding touch sensor and
+-- the GlideStarted remote) once at init time.
 ------------------------------------------------------------
 local function wireTutorialParts(deps: any)
 	local map = getMap()
-	local cliff = map:WaitForChild("PracticeCliff")
+	local island = map:WaitForChild("TutorialIsland") :: Folder
+	local landing = island:WaitForChild("MainIslandLanding") :: BasePart
 
-	local coin = cliff:WaitForChild("TutorialCoin") :: BasePart
-	coin.Touched:Connect(function(hit)
-		local char = hit.Parent
-		local humanoid = char and char:FindFirstChildWhichIsA("Humanoid")
-		if not humanoid or humanoid.Health <= 0 then return end
-		local player = Players:GetPlayerFromCharacter(char)
-		if not player then return end
+	-- Glide started by a tutorial player → mark them as having reached
+	-- the Glide phase (so the landing-zone touch counts as success).
+	Remotes.GlideStarted.OnServerEvent:Connect(function(player)
 		local info = playerStates[player]
-		if not info or info.state ~= "Step1_GrabCoin" then return end
-
-		-- Claim the coin visually for this tutorial player.
-		coin.Transparency = 1
-		task.delay(3, function()
-			coin.Transparency = 0
-		end)
-
-		deps.PlayerDataService.addCoins(player, coin:GetAttribute("Value") or 5)
-		pushState(player, "Step2_Glide")
-		Remotes.Notify:FireClient(player, "Nice! Now walk off the cliff edge to glide to the tree.")
+		if not info or info.finished then return end
+		if info.state == "Greet" or info.state == "Glide" then
+			pushState(player, "Glide")
+		end
 	end)
 
-	local ledgeEdge = cliff:WaitForChild("TutorialLedgeEdge") :: BasePart
-	ledgeEdge.Touched:Connect(function(hit)
+	-- Player's character touches the main island landing zone → tutorial
+	-- complete. NO state guard (Owen's "no boundaries" rule): any
+	-- contact with MainIslandLanding while mid-tutorial finishes it,
+	-- whether they glided, fell, or respawned onto the main island.
+	landing.Touched:Connect(function(hit)
 		local char = hit.Parent
-		local humanoid = char and char:FindFirstChildWhichIsA("Humanoid")
-		if not humanoid or humanoid.Health <= 0 then return end
+		if not char then return end
 		local player = Players:GetPlayerFromCharacter(char)
 		if not player then return end
 		local info = playerStates[player]
-		if not info or info.state ~= "Step2_Glide" then return end
-
-		-- Client reacts to the _InAir sub-state and calls _G.SYLS_StartGlide.
-		pushState(player, "Step2_Glide_InAir")
-
-		task.spawn(function()
-			local landing = (getMap():FindFirstChild("PracticeCliff") :: Folder)
-				:FindFirstChild("TutorialLandingPad") :: BasePart?
-			if not landing then finishTutorial(player, deps); return end
-
-			local done = false
-			local conn
-			conn = landing.Touched:Connect(function(h)
-				if done then return end
-				local c = h.Parent
-				if c == player.Character then
-					done = true
-					if conn then conn:Disconnect() end
-					finishTutorial(player, deps)
-				end
-			end)
-			-- Safety fallback: finish after 10s even if the landing pad didn't fire.
-			task.delay(10, function()
-				if done then return end
-				done = true
-				if conn then conn:Disconnect() end
-				finishTutorial(player, deps)
-			end)
-		end)
+		if not info or info.finished then return end
+		finishTutorial(player, deps)
 	end)
 end
+
+-- (Fall-recovery loop removed — Owen's "no boundaries" rule. Players
+-- who fall off the tutorial island just respawn at the main spawn pad
+-- via FallenPartsDestroyHeight, where MainIslandLanding's touch sensor
+-- finishes the tutorial naturally on the next frame.)
 
 ------------------------------------------------------------
 -- Public
@@ -200,30 +167,38 @@ end
 function TutorialService.init(deps: { PlayerDataService: any })
 	wireTutorialParts(deps)
 
+	-- Skip button → fast-finish. Honored from any state.
 	Remotes.TutorialSkip.OnServerEvent:Connect(function(player)
 		local info = playerStates[player]
-		if not info or info.state == "Done" then return end
+		if not info or info.finished then return end
 		finishTutorial(player, deps)
 	end)
 
 	Players.PlayerAdded:Connect(function(player)
 		player.CharacterAdded:Connect(function(char)
-			-- Wait a moment for profile to load.
 			task.wait(0.3)
 			local profile = deps.PlayerDataService.get(player)
 			if not profile then return end
+
 			if profile.HasCompletedTutorial then
-				-- Returning player: no tutorial.
-				playerStates[player] = { state = "Done" }
+				playerStates[player] = { state = "Done", finished = true }
 				Remotes.TutorialState:FireClient(player, "Done", nil)
 				return
 			end
-			-- First-time player: begin tutorial on the cliff.
-			playerStates[player] = { state = "Step1_GrabCoin" }
-			applyForceField(player)
-			teleportToPracticeCliff(player)
-			pushState(player, "Step1_GrabCoin")
-			Remotes.Notify:FireClient(player, "Welcome to Stretch Your Limbs Simulator! Grab the glowing coin on the pedestal to begin.")
+
+			playerStates[player] = { state = "Greet", finished = false }
+			-- No ForceField. No safety net. Player is free to die / fall /
+			-- explore however they want.
+			teleportToIsland(player)
+			pushState(player, "Greet")
+
+			task.delay(Config.Tutorial.GreetDuration, function()
+				local info = playerStates[player]
+				if not info or info.finished then return end
+				if info.state == "Greet" then
+					pushState(player, "Glide")
+				end
+			end)
 		end)
 	end)
 
@@ -231,7 +206,7 @@ function TutorialService.init(deps: { PlayerDataService: any })
 		playerStates[player] = nil
 	end)
 
-	print("[TutorialService] Ready.")
+	print("[TutorialService] Floating-island tutorial ready.")
 end
 
 return TutorialService

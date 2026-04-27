@@ -20,10 +20,16 @@ Map.Map = {
 	TreeTrunkRadius = 22,
 	TreeHeight = 340,
 
-	-- Practice cliff (tutorial area). Placed off to the side of the tree.
-	PracticeCliff = {
-		Position = Vector3.new(160, 0, 0), -- 160 studs east of spawn
-		Height = 45,
+	-- Tutorial floating island (tutorial area). Replaces the old practice
+	-- cliff. Sits in the sky east of the tree; first-join players must
+	-- glide off the western edge to reach the main island.
+	TutorialIsland = {
+		-- 200 studs east of the tree, 80 above ground. Far enough that
+		-- the tutorial island doesn't overlap the main island (main has
+		-- diameter 220 in MapBuilder so its eastern edge is ~X=110;
+		-- tutorial center at X=200 means a clear ~60-stud air gap).
+		Position = Vector3.new(200, 80, 0),
+		Diameter = 60,
 	},
 
 	-- Phase height bands (Y coordinates).

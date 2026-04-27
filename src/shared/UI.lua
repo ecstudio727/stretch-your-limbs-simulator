@@ -28,6 +28,7 @@ local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 
 local Icons = require(script.Parent:WaitForChild("Icons"))
+local StudsUI = require(script.Parent:WaitForChild("StudsUI"))
 
 local UI = {}
 
@@ -296,22 +297,25 @@ function UI.newIcon(key: string, sizePx: number, fallbackText: string?): GuiObje
 	return txt
 end
 
--- Right-rail icon button. 44×44 visual rect, 48×48 hitbox, real icon
--- centered inside (or fallback text). Drop-in replacement for the
--- previous text-only newIconButton.
+-- Right-rail icon button. 88×88 visual rect (2× the small IconButton size),
+-- 92×92 hitbox, real icon centered inside (or fallback text). Sized
+-- generously because these are the primary nav buttons; smaller utility
+-- buttons should use UI.newButton with a custom Visual instead.
 function UI.newRailButton(opts: {
 	Icon: string,
 	Fallback: string?,
 	Color: Color3?,
 	IconSize: number?,
+	Visual: Vector2?,   -- override if you want a non-rail-sized icon button
 }): (TextButton, Frame)
+	local visual = opts.Visual or Vector2.new(88, 88)
 	local outer, inner = UI.newButton({
 		Text = "",
 		Color = opts.Color or UI.Colors.SurfaceHot,
-		Visual = UI.Size.IconButton,
-		Hitbox = Vector2.new(48, 48),
+		Visual = visual,
+		Hitbox = Vector2.new(visual.X + 4, visual.Y + 4),
 	})
-	local icon = UI.newIcon(opts.Icon, opts.IconSize or 28, opts.Fallback)
+	local icon = UI.newIcon(opts.Icon, opts.IconSize or math.floor(visual.X * 0.66), opts.Fallback)
 	icon.AnchorPoint = Vector2.new(0.5, 0.5)
 	icon.Position = UDim2.new(0.5, 0, 0.5, 0)
 	icon.Parent = inner
@@ -380,6 +384,168 @@ function UI.attachHoverFx(outer: GuiButton, inner: GuiObject?)
 	outer.MouseLeave:Connect(function() hovered = false; pressed = false; refresh() end)
 	outer.MouseButton1Down:Connect(function() pressed = true; refresh() end)
 	outer.MouseButton1Up:Connect(function() pressed = false; refresh() end)
+end
+
+------------------------------------------------------------
+-- 3D candy button — the chunky lifted-shadow style players associate
+-- with simulator games. Lifted from flip-a-coin-for-brainrots'
+-- make3DButton helper. Returns (button, container, shadow):
+--   * button     — the TextButton you wire input to
+--   * container  — the outer Frame, set its Position/AnchorPoint
+--   * shadow     — the dark Frame underneath (recolor it together with
+--                  the button when state-swapping, otherwise the lift
+--                  effect breaks)
+------------------------------------------------------------
+function UI.new3DButton(opts: {
+	Parent: Instance?,
+	Text: string?,
+	Size: UDim2?,
+	Position: UDim2?,
+	AnchorPoint: Vector2?,
+	TopColor: Color3?,
+	BottomColor: Color3?,
+	Mobile: boolean?,
+	Font: Enum.Font?,
+	TextSize: number?,
+}): (TextButton, Frame, Frame)
+	local mobile = opts.Mobile
+	if mobile == nil then mobile = UI.isTouch() end
+
+	local SHADOW_LIFT = mobile and 4 or 8
+	local BTN_INSET   = mobile and 4 or 8
+	local PRESS_DROP  = mobile and 2 or 5
+	local CORNER_BTN  = mobile and 10 or 16
+	local CORNER_SHINE = mobile and 8 or 12
+
+	local container = Instance.new("Frame")
+	container.Name = "Button3D"
+	container.Size = opts.Size or UDim2.new(0, 200, 0, 80)
+	container.Position = opts.Position or UDim2.new(0.5, 0, 0.5, 0)
+	container.AnchorPoint = opts.AnchorPoint or Vector2.new(0, 0)
+	container.BackgroundTransparency = 1
+	if opts.Parent then container.Parent = opts.Parent end
+
+	local shadow = Instance.new("Frame")
+	shadow.Name = "Shadow"
+	shadow.Size = UDim2.new(1, 0, 1, -BTN_INSET / 2)
+	shadow.Position = UDim2.new(0, 0, 0, SHADOW_LIFT)
+	shadow.BackgroundColor3 = opts.BottomColor or Color3.fromRGB(20, 140, 20)
+	shadow.BorderSizePixel = 0
+	shadow.ZIndex = 1
+	shadow.Parent = container
+	local shadowCorner = Instance.new("UICorner"); shadowCorner.CornerRadius = UDim.new(0, CORNER_BTN); shadowCorner.Parent = shadow
+
+	local btn = Instance.new("TextButton")
+	btn.Name = "Button"
+	btn.Size = UDim2.new(1, 0, 1, -BTN_INSET)
+	btn.Position = UDim2.new(0, 0, 0, 0)
+	btn.BackgroundColor3 = opts.TopColor or Color3.fromRGB(40, 200, 40)
+	btn.Text = opts.Text or ""
+	btn.TextColor3 = Color3.new(1, 1, 1)
+	btn.TextScaled = (opts.TextSize == nil)
+	if opts.TextSize then btn.TextSize = opts.TextSize end
+	btn.Font = opts.Font or Enum.Font.FredokaOne
+	btn.TextStrokeTransparency = 0
+	btn.TextStrokeColor3 = Color3.new(0, 0, 0)
+	btn.BorderSizePixel = 0
+	btn.AutoButtonColor = false
+	btn.ZIndex = 2
+	btn.Parent = container
+	local btnCorner = Instance.new("UICorner"); btnCorner.CornerRadius = UDim.new(0, CORNER_BTN); btnCorner.Parent = btn
+
+	-- White semi-transparent shine along the top — the "candy gloss".
+	local shine = Instance.new("Frame")
+	shine.Name = "Shine"
+	shine.Size = UDim2.new(1, -10, 0.4, 0)
+	shine.Position = UDim2.new(0, 5, 0, 3)
+	shine.BackgroundColor3 = Color3.new(1, 1, 1)
+	shine.BackgroundTransparency = 0.85
+	shine.BorderSizePixel = 0
+	shine.Active = false
+	shine.ZIndex = 3
+	shine.Parent = btn
+	local shineCorner = Instance.new("UICorner"); shineCorner.CornerRadius = UDim.new(0, CORNER_SHINE); shineCorner.Parent = shine
+
+	-- Subtle stud texture overlay (the dotted Roblox-stud pattern).
+	StudsUI.apply(btn, CORNER_BTN)
+
+	local padding = Instance.new("UIPadding")
+	padding.PaddingLeft = UDim.new(0, 6)
+	padding.PaddingRight = UDim.new(0, 6)
+	padding.PaddingTop = UDim.new(0, 4)
+	padding.Parent = btn
+
+	-- Press: button drops + shrinks, springs back with Back ease-out.
+	-- Bypass UI.tween here because we want the spring even when
+	-- ReducedMotion is on (this is the affordance, not eye candy).
+	btn.MouseButton1Down:Connect(function()
+		UI.clickBurst(btn)
+		TweenService:Create(btn, TweenInfo.new(0.05), {
+			Position = UDim2.new(0, 0, 0, PRESS_DROP),
+			Size = UDim2.new(1, 0, 1, -(BTN_INSET + PRESS_DROP)),
+		}):Play()
+	end)
+	btn.MouseButton1Up:Connect(function()
+		TweenService:Create(btn, TweenInfo.new(0.1, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+			Position = UDim2.new(0, 0, 0, 0),
+			Size = UDim2.new(1, 0, 1, -BTN_INSET),
+		}):Play()
+	end)
+	btn.MouseLeave:Connect(function()
+		TweenService:Create(btn, TweenInfo.new(0.1), {
+			Position = UDim2.new(0, 0, 0, 0),
+			Size = UDim2.new(1, 0, 1, -BTN_INSET),
+		}):Play()
+	end)
+
+	return btn, container, shadow
+end
+
+-- Click-burst: 2 expanding white rings + 6 colored sparks shooting outward
+-- from the button's center. Lifted verbatim from the flip-a-coin source so
+-- the timing matches Owen's reference. Suppressed under ReducedMotion.
+function UI.clickBurst(btn: GuiObject)
+	if UI.isReducedMotion() then return end
+	for r = 1, 2 do
+		local ring = Instance.new("Frame")
+		ring.Size = UDim2.new(0, 10, 0, 10)
+		ring.AnchorPoint = Vector2.new(0.5, 0.5)
+		ring.Position = UDim2.new(0.5, 0, 0.5, 0)
+		ring.BackgroundTransparency = 1
+		ring.BorderSizePixel = 0
+		ring.ZIndex = 4
+		ring.Parent = btn
+		local rc = Instance.new("UICorner"); rc.CornerRadius = UDim.new(1, 0); rc.Parent = ring
+		local ringStroke = Instance.new("UIStroke")
+		ringStroke.Thickness = 3
+		ringStroke.Color = Color3.new(1, 1, 1)
+		ringStroke.Transparency = 0.3
+		ringStroke.Parent = ring
+		TweenService:Create(ring, TweenInfo.new(0.4 + r * 0.1, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+			Size = UDim2.new(0, 120, 0, 120),
+		}):Play()
+		TweenService:Create(ringStroke, TweenInfo.new(0.4 + r * 0.1), { Transparency = 1 }):Play()
+		task.delay(0.5 + r * 0.1, function() ring:Destroy() end)
+	end
+	for p = 1, 6 do
+		local spark = Instance.new("Frame")
+		spark.Size = UDim2.new(0, 8, 0, 8)
+		spark.AnchorPoint = Vector2.new(0.5, 0.5)
+		spark.Position = UDim2.new(0.5, 0, 0.5, 0)
+		spark.BackgroundColor3 = Color3.fromRGB(255, 255, math.random(100, 255))
+		spark.BorderSizePixel = 0
+		spark.ZIndex = 4
+		spark.Parent = btn
+		local sc = Instance.new("UICorner"); sc.CornerRadius = UDim.new(1, 0); sc.Parent = spark
+		local angle = (p / 6) * math.pi * 2 + math.random() * 0.5
+		local dist = math.random(40, 80)
+		TweenService:Create(spark, TweenInfo.new(0.35, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+			Position = UDim2.new(0.5 + math.cos(angle) * dist / 100, 0, 0.5 + math.sin(angle) * dist / 100, 0),
+			Size = UDim2.new(0, 3, 0, 3),
+			BackgroundTransparency = 1,
+		}):Play()
+		task.delay(0.4, function() spark:Destroy() end)
+	end
 end
 
 -- Slide-up + fade-in entrance. Call after parenting the frame to its

@@ -63,16 +63,20 @@ function GlideService.init(deps: { LeaderboardService: any, PlayerDataService: a
 		local coinsEarned = math.floor(distance * Config.Glide.CoinsPerStud)
 		if coinsEarned > 0 then
 			local actual = PlayerDataService.addCoins(player, coinsEarned)
-			Remotes.Notify:FireClient(player, ("+%d coins (%d stud glide)"):format(actual or coinsEarned, math.floor(distance)))
+			Remotes.Notify:FireClient(player, ("+%d coins!"):format(actual or coinsEarned))
 		end
 
-		-- Update best-glide record.
+		-- Update best-glide record. The internal field (BestGlideDistance)
+		-- is still kept in studs for leaderboard comparisons, but the
+		-- player-facing toast reports it as coins so the number lines up
+		-- with the HUD's BEST stat.
 		local profile = PlayerDataService.get(player)
 		if profile and distance > (profile.BestGlideDistance or 0) then
 			PlayerDataService.update(player, function(p)
 				p.BestGlideDistance = math.floor(distance)
 			end)
-			Remotes.Notify:FireClient(player, ("NEW RECORD: %d studs!"):format(math.floor(distance)))
+			local recordCoins = math.floor(distance * Config.Glide.CoinsPerStud)
+			Remotes.Notify:FireClient(player, ("NEW RECORD: %d coins!"):format(recordCoins))
 		end
 
 		-- Post to leaderboard.

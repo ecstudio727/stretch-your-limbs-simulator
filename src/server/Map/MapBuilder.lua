@@ -17,7 +17,7 @@
 --   IsKillBrick
 --   IsCheckpoint / IsJumpBranch / IsJumpTip
 --   IsCoin / Value / Phase
---   IsTutorialCoin / IsTutorialLedge / IsTutorialLanding
+--   IsLaunchEdge / IsMainIslandLanding (tutorial floating island)
 
 local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -29,6 +29,52 @@ local MapBuilder = {}
 ------------------------------------------------------------
 -- Helpers
 ------------------------------------------------------------
+-- Cartoon-stylized world: every part gets a tiled stud-pattern Texture
+-- on all 6 faces. We tried legacy SurfaceType.Studs first but those don't
+-- render visibly in modern Roblox — only the texture overlay actually
+-- shows up on screen. Asset is the same stud-pattern image the FlipUI
+-- button uses (rbxassetid://137014639625779), at 2 studs per tile, 0.15
+-- transparency so the studs read clearly without obliterating the
+-- underlying material color.
+local STUD_ASSET = "rbxassetid://137014639625779"
+local STUD_FACES = {
+	Enum.NormalId.Top,    Enum.NormalId.Bottom,
+	Enum.NormalId.Left,   Enum.NormalId.Right,
+	Enum.NormalId.Front,  Enum.NormalId.Back,
+}
+local function applyStudTexture(part: Part)
+	for _, face in ipairs(STUD_FACES) do
+		local t = Instance.new("Texture")
+		t.Texture = STUD_ASSET
+		t.Face = face
+		t.StudsPerTileU = 2
+		t.StudsPerTileV = 2
+		t.Transparency = 0.15
+		t.Parent = part
+	end
+end
+
+-- Saturation/brightness pump for cartoon-pop colors. Every part's color
+-- runs through this so the legacy muddy browns / dull greens get pushed
+-- into the bright Pet-Simulator palette without rewriting every call.
+-- Tunable: SAT_MUL/ADD lift saturation toward 1.0; VAL_MUL/ADD lift the
+-- value (brightness). Hue is preserved so the artistic intent of every
+-- existing color is kept.
+local SAT_MUL, SAT_ADD = 1.6, 0.2
+local VAL_MUL, VAL_ADD = 1.2, 0.15
+local function popColor(c: Color3): Color3
+	local h, s, v = Color3.toHSV(c)
+	s = math.clamp(s * SAT_MUL + SAT_ADD, 0, 1)
+	v = math.clamp(v * VAL_MUL + VAL_ADD, 0, 1)
+	return Color3.fromHSV(h, s, v)
+end
+
+-- Every part in the map runs through newPart, so this is the one-stop
+-- guarantee that EVERYTHING in the world has (a) visible stud texture,
+-- (b) Plastic material, and (c) a saturated cartoon-pop color. All
+-- three overrides apply AFTER the props loop so they win over per-call
+-- settings in legacy build code — keeps the cartoon-stylized world
+-- consistent without hunting down every callsite.
 local function newPart(props: { [string]: any }): Part
 	local p = Instance.new("Part")
 	p.Anchored = true
@@ -38,6 +84,9 @@ local function newPart(props: { [string]: any }): Part
 	for k, v in pairs(props) do
 		(p :: any)[k] = v
 	end
+	p.Material = Enum.Material.Plastic
+	p.Color = popColor(p.Color)
+	applyStudTexture(p)
 	return p
 end
 
@@ -56,6 +105,22 @@ end
 
 local function ringPos(center: Vector3, radius: number, angle: number, y: number): Vector3
 	return Vector3.new(center.X + math.cos(angle) * radius, y, center.Z + math.sin(angle) * radius)
+end
+
+-- Returns (cframe, length) for a Cylinder Shape whose long axis (+X) points
+-- from startPos to endPos. The cylinder lies along the segment, midpoint at
+-- the average of the two world points. Used by every "branch" and "root"
+-- builder so the cylinder orientation logic exists in one place.
+local function cylinderAlongCFrame(startPos: Vector3, endPos: Vector3): (CFrame, number)
+	local mid = (startPos + endPos) / 2
+	local diff = endPos - startPos
+	local len = diff.Magnitude
+	local dir = diff.Unit
+	local refUp = Vector3.new(0, 1, 0)
+	if math.abs(dir:Dot(refUp)) > 0.99 then refUp = Vector3.new(1, 0, 0) end
+	local sideways = dir:Cross(refUp).Unit
+	local up = sideways:Cross(dir).Unit
+	return CFrame.fromMatrix(mid, dir, up), len
 end
 
 ------------------------------------------------------------
@@ -77,6 +142,11 @@ local function decorPart(props: { [string]: any }): Part
 	for k, v in pairs(props) do
 		(p :: any)[k] = v
 	end
+	-- Same Plastic + stud-texture + saturation-pop pipeline as newPart so
+	-- decoration matches gameplay parts in the cartoon palette.
+	p.Material = Enum.Material.Plastic
+	p.Color = popColor(p.Color)
+	applyStudTexture(p)
 	return p
 end
 
@@ -87,6 +157,127 @@ local function tintShift(base: Color3, hOffset: number, sOffset: number, vOffset
 	s = math.clamp(s + sOffset, 0, 1)
 	v = math.clamp(v + vOffset, 0, 1)
 	return Color3.fromHSV(h, s, v)
+end
+
+------------------------------------------------------------
+-- Island template helpers.
+--
+-- Owen places an "Island" Model in ReplicatedStorage (manually, in
+-- Studio — Rojo doesn't manage that root). Every island in the world
+-- (main spawn island, tutorial floating island, future floaters) is a
+-- CLONE of that template with slight variations applied so they read
+-- as siblings rather than duplicates.
+--
+-- Variations applied per island: HSV color shift on every part, Y-axis
+-- rotation, uniform scale. If the template isn't found, builders fall
+-- back to procedural geometry so the world still loads.
+------------------------------------------------------------
+local function findIslandTemplate(): Model?
+	local rs = game:GetService("ReplicatedStorage")
+	-- Direct names first, in priority order.
+	for _, name in ipairs({ "Island", "IslandTemplate", "FloatingIsland", "TemplateIsland" }) do
+		local found = rs:FindFirstChild(name)
+		if found and found:IsA("Model") then return found end
+	end
+	-- Fuzzy: any top-level Model with "island" in its name.
+	for _, child in ipairs(rs:GetChildren()) do
+		if child:IsA("Model") and string.find(string.lower(child.Name), "island") then
+			return child
+		end
+	end
+	-- Deep search: any Model anywhere in ReplicatedStorage with "island"
+	-- in its name. Catches cases where the template was nested inside a
+	-- folder by accident.
+	for _, descendant in ipairs(rs:GetDescendants()) do
+		if descendant:IsA("Model") and string.find(string.lower(descendant.Name), "island") then
+			return descendant
+		end
+	end
+	return nil
+end
+
+-- A Model needs a PrimaryPart for PivotTo / ScaleTo to work cleanly.
+-- If Owen didn't set one in Studio, pick the largest BasePart by volume
+-- so the pivot at least makes geometric sense.
+local function ensurePrimaryPart(model: Model)
+	if model.PrimaryPart and model.PrimaryPart:IsDescendantOf(model) then return end
+	local biggest, bestVol = nil, 0
+	for _, d in ipairs(model:GetDescendants()) do
+		if d:IsA("BasePart") then
+			local v = d.Size.X * d.Size.Y * d.Size.Z
+			if v > bestVol then biggest, bestVol = d, v end
+		end
+	end
+	if biggest then model.PrimaryPart = biggest end
+end
+
+-- Clone the template and apply the requested variations. Returns the
+-- cloned Model parented to opts.parent, positioned + rotated + scaled +
+-- color-shifted as requested.
+--
+-- Sizing modes (in priority order):
+--   1. opts.targetDiameter — auto-scale so max(width, length) hits this
+--      value in world units. This is what you usually want; it's robust
+--      to the template's natural size changing.
+--   2. opts.scale — fall back to explicit multiplier if targetDiameter
+--      not provided. Default 1.
+local function cloneIslandWith(template: Model, opts: {
+	parent: Instance,
+	name: string,
+	position: Vector3,
+	yRotation: number?,
+	scale: number?,
+	targetDiameter: number?,
+	hueShift: number?,
+	satShift: number?,
+	valShift: number?,
+}): Model
+	local clone = template:Clone()
+	clone.Name = opts.name
+	ensurePrimaryPart(clone)
+
+	-- Walk the clone once. Anchored is non-negotiable (else the parts
+	-- fall through the world). HSV variation makes two clones look
+	-- like siblings. Stud texture overlay is added so cloned islands
+	-- match the rest of the cartoon-stud world; if your template also
+	-- has its own stud styling baked in (raised geometry / Texture
+	-- instances) and you see "double studs", remove that from the
+	-- template — this layer alone keeps the islands consistent.
+	local hShift = opts.hueShift or 0
+	local sShift = opts.satShift or 0
+	local vShift = opts.valShift or 0
+	local partCount = 0
+	for _, d in ipairs(clone:GetDescendants()) do
+		if d:IsA("BasePart") then
+			partCount += 1
+			d.Anchored = true
+			if hShift ~= 0 or sShift ~= 0 or vShift ~= 0 then
+				d.Color = tintShift(d.Color, hShift, sShift, vShift)
+			end
+			applyStudTexture(d)
+		end
+	end
+	print(("[MapBuilder] Clone '%s': %d parts, target diameter=%s"):format(
+		opts.name, partCount, tostring(opts.targetDiameter or "n/a")))
+
+	-- Pick the scale. targetDiameter wins over explicit scale.
+	local scale = opts.scale or 1
+	if opts.targetDiameter then
+		local _, naturalSize = clone:GetBoundingBox()
+		local naturalDiameter = math.max(naturalSize.X, naturalSize.Z)
+		if naturalDiameter > 0.01 then
+			scale = opts.targetDiameter / naturalDiameter
+		end
+	end
+	if scale ~= 1.0 then
+		clone:ScaleTo(scale)
+	end
+
+	-- Position + rotate via PivotTo.
+	clone:PivotTo(CFrame.new(opts.position) * CFrame.Angles(0, opts.yRotation or 0, 0))
+
+	clone.Parent = opts.parent
+	return clone
 end
 
 -- Phase 1 plank decoration: gnarled roots dangling off the underside, moss
@@ -447,11 +638,72 @@ end
 ------------------------------------------------------------
 local ISLAND_RADIUS = 130
 
+-- Forward declaration so buildGroundAndSpawn (defined now) can call the
+-- fallback (defined further down the file). Lua only resolves locals
+-- that are declared before the closure is created, hence this dance.
+local buildProceduralFallbackIsland
+
 local function buildGroundAndSpawn(parent: Instance)
 	local islandFolder = Instance.new("Folder")
 	islandFolder.Name = "Island"
 	islandFolder.Parent = parent
 
+	-- New flow: clone the island Model that Owen placed in
+	-- ReplicatedStorage, scaled up so the tree + obby fit on top.
+	-- Slightly desaturated relative to the floating tutorial island
+	-- so the two feel like siblings rather than identical twins.
+	local template = findIslandTemplate()
+	if template then
+		print(("[MapBuilder] Found island template: '%s' (path: %s)"):format(template.Name, template:GetFullName()))
+		local model = cloneIslandWith(template, {
+			parent = islandFolder,
+			name = "MainIsland",
+			position = Vector3.new(0, 0, 0),
+			yRotation = math.rad(15),
+			targetDiameter = 220,    -- world-size big enough for tree + Phase 1 branches
+			hueShift = -0.02,
+			satShift = -0.02,
+		})
+		-- Auto-snap so the island's TOP edge sits at Y=0 (where the tree
+		-- expects to start). Saves Owen from caring about template pivot.
+		local cf, size = model:GetBoundingBox()
+		local topYBefore = cf.Position.Y + size.Y / 2
+		model:PivotTo(model:GetPivot() + Vector3.new(0, -topYBefore, 0))
+		local _, finalSize = model:GetBoundingBox()
+		print(("[MapBuilder] Main island built. Bounding box: %.0f×%.0f×%.0f (W×H×L)"):format(finalSize.X, finalSize.Y, finalSize.Z))
+	else
+		warn("[MapBuilder] No island Model found in ReplicatedStorage — falling back to procedural island. Place a Model named 'Island' (or anything containing 'island') anywhere under ReplicatedStorage to use a custom one.")
+		buildProceduralFallbackIsland(islandFolder)
+	end
+
+	-- Spawn pad + SpawnLocation always added on top, regardless of
+	-- whether geometry came from template or fallback.
+	local spawnPad = newPart({
+		Name = "SpawnPad",
+		Size = Vector3.new(36, 1, 24),
+		Position = Vector3.new(0, 2, Config.Map.TreeTrunkRadius + 18),
+		Color = Color3.fromRGB(120, 120, 110),
+	})
+	spawnPad.Parent = parent
+
+	local spawnLoc = Instance.new("SpawnLocation")
+	spawnLoc.Name = "StartSpawn"
+	spawnLoc.Size = Vector3.new(8, 1, 8)
+	spawnLoc.Position = Vector3.new(0, 3, Config.Map.TreeTrunkRadius + 18)
+	spawnLoc.Anchored = true
+	spawnLoc.TopSurface = Enum.SurfaceType.Smooth
+	spawnLoc.Material = Enum.Material.Plastic
+	spawnLoc.BrickColor = BrickColor.new("Bright green")
+	spawnLoc.Duration = 0
+	spawnLoc.Parent = parent
+end
+
+-- Procedural island fallback used when no template Model exists in
+-- ReplicatedStorage. Same code that lived inline before, just hoisted
+-- so buildGroundAndSpawn can branch on template availability. NOTE: the
+-- spawn pad + SpawnLocation are NOT created here — buildGroundAndSpawn
+-- adds those after either branch returns, so they exist exactly once.
+buildProceduralFallbackIsland = function(islandFolder: Instance)
 	local islandThickness = 12
 
 	-- Top grass disc — flat round island surface, top flush with Y=0.
@@ -460,7 +712,6 @@ local function buildGroundAndSpawn(parent: Instance)
 		Size = Vector3.new(islandThickness, ISLAND_RADIUS * 2, ISLAND_RADIUS * 2),
 		CFrame = CFrame.new(0, -islandThickness / 2, 0) * CFrame.Angles(0, 0, math.rad(90)),
 		Shape = Enum.PartType.Cylinder,
-		Material = Enum.Material.Grass,
 		Color = Color3.fromRGB(80, 130, 70),
 	})
 	grass.Parent = islandFolder
@@ -476,7 +727,6 @@ local function buildGroundAndSpawn(parent: Instance)
 		CFrame = CFrame.new(0, -islandThickness - underTopThickness / 2, 0)
 			* CFrame.Angles(0, 0, math.rad(90)),
 		Shape = Enum.PartType.Cylinder,
-		Material = Enum.Material.Rock,
 		Color = Color3.fromRGB(95, 78, 60),
 	})
 	underTop.Parent = islandFolder
@@ -492,7 +742,6 @@ local function buildGroundAndSpawn(parent: Instance)
 			0
 		) * CFrame.Angles(0, 0, math.rad(90)),
 		Shape = Enum.PartType.Cylinder,
-		Material = Enum.Material.Rock,
 		Color = Color3.fromRGB(72, 58, 44),
 	})
 	underBottom.Parent = islandFolder
@@ -527,221 +776,133 @@ local function buildGroundAndSpawn(parent: Instance)
 			Name = "IslandTuft_" .. i,
 			Size = Vector3.new(2.5, 1, 2.5),
 			Position = Vector3.new(math.cos(angle) * r, 0.5, math.sin(angle) * r),
-			Material = Enum.Material.Grass,
 			Color = Color3.fromRGB(95, 160, 80),
 			CanCollide = false,
 		})
 		tuft.Parent = islandFolder
 	end
-
-	-- A paved pad at the tree entrance.
-	local spawnPad = newPart({
-		Name = "SpawnPad",
-		Size = Vector3.new(36, 1, 24),
-		Position = Vector3.new(0, 2, Config.Map.TreeTrunkRadius + 18),
-		Material = Enum.Material.Slate,
-		Color = Color3.fromRGB(120, 120, 110),
-	})
-	spawnPad.Parent = parent
-
-	local spawnLoc = Instance.new("SpawnLocation")
-	spawnLoc.Name = "StartSpawn"
-	spawnLoc.Size = Vector3.new(8, 1, 8)
-	spawnLoc.Position = Vector3.new(0, 3, Config.Map.TreeTrunkRadius + 18)
-	spawnLoc.Anchored = true
-	spawnLoc.TopSurface = Enum.SurfaceType.Smooth
-	spawnLoc.Material = Enum.Material.Neon
-	spawnLoc.BrickColor = BrickColor.new("Bright green")
-	spawnLoc.Duration = 0
-	spawnLoc.Parent = parent
 end
 
 ------------------------------------------------------------
--- Practice Cliff (tutorial area)
--- A real elevated cliff to the east, plateau at Y=45, facing the tree.
--- Flow: spawn on plateau -> grab coin -> walk to west edge -> step off ->
---       auto-glide over grass -> land near the tree base.
+-- Tutorial Floating Island
+--
+-- Sky island offset 60 studs east of the tree at Y=80. Players spawn
+-- here on first join. The ONLY way to reach the main world (where the
+-- tree obby starts) is to step off the western edge and glide.
+--
+-- Glide math at level-0 wingspan: forward=20, fall=24, distance from
+-- height 80 ≈ 20 × (80/24) ≈ 67 studs. The horizontal gap is 60 studs,
+-- so a basic glide just clears it with margin. A non-glider falls
+-- short (lateral ≈ 22 studs in walk-speed × airtime) and the ForceField
+-- + fall-recovery teleport bounces them back to the island to retry.
+--
+-- Named parts (TutorialService.lua keys off these names):
+--   * IslandTop          — the walkable grass surface
+--   * LaunchEdge         — invisible touch trigger at the western drop edge
+--   * MainIslandLanding  — wide invisible touch trigger over the main island
+--                          ground; touching it counts as a successful glide
 ------------------------------------------------------------
-local function buildPracticeCliff(parent: Instance)
+local function buildTutorialIsland(parent: Instance)
 	local folder = Instance.new("Folder")
-	folder.Name = "PracticeCliff"
+	folder.Name = "TutorialIsland"
 	folder.Parent = parent
 
-	local plateauY = Config.Map.PracticeCliff.Height -- 45
-	local cliffCenter = Config.Map.PracticeCliff.Position -- (160, 0, 0)
+	local pos = Config.Map.TutorialIsland.Position   -- (60, 80, 0)
 
-	-- Small floating rock base so the cliff reads as its own crag floating
-	-- in the void rather than a hovering box. Wider than the pillar; flush
-	-- top with where the (now-removed) ground used to be.
-	local cliffBase = newPart({
-		Name = "CliffBase",
-		Size = Vector3.new(14, 70, 56),
-		CFrame = CFrame.new(cliffCenter.X + 20, -7, 0) * CFrame.Angles(0, 0, math.rad(90)),
-		Shape = Enum.PartType.Cylinder,
-		Material = Enum.Material.Rock,
-		Color = Color3.fromRGB(95, 80, 65),
-	})
-	cliffBase.Parent = folder
+	-- Geometry comes from the same ReplicatedStorage island template the
+	-- main island uses — slightly different variation so the two read
+	-- as siblings (same family, different mood).
+	local template = findIslandTemplate()
+	local centerCF: CFrame
+	local size: Vector3
 
-	local cliffBaseUnder = newPart({
-		Name = "CliffBaseUnder",
-		Size = Vector3.new(20, 36, 30),
-		CFrame = CFrame.new(cliffCenter.X + 20, -24, 0) * CFrame.Angles(0, 0, math.rad(90)),
-		Shape = Enum.PartType.Cylinder,
-		Material = Enum.Material.Rock,
-		Color = Color3.fromRGB(72, 58, 44),
-	})
-	cliffBaseUnder.Parent = folder
-
-	-- BIG rocky cliff face. Solid stone pillar rising from the floating base.
-	local pillar = newPart({
-		Name = "CliffPillar",
-		Size = Vector3.new(60, plateauY, 46),
-		Position = Vector3.new(cliffCenter.X + 20, plateauY / 2, 0),
-		Material = Enum.Material.Rock,
-		Color = Color3.fromRGB(110, 100, 90),
-	})
-	pillar.Parent = folder
-
-	-- Plateau top — the walkable surface.
-	local plateau = newPart({
-		Name = "Plateau",
-		Size = Vector3.new(50, 2, 30),
-		Position = Vector3.new(cliffCenter.X + 15, plateauY + 1, 0),
-		Material = Enum.Material.Slate,
-		Color = Color3.fromRGB(140, 130, 115),
-	})
-	plateau.Parent = folder
-
-	-- A grassy cap on the plateau to make it feel natural.
-	local grassCap = newPart({
-		Name = "PlateauGrass",
-		Size = Vector3.new(48, 0.2, 28),
-		Position = Vector3.new(cliffCenter.X + 15, plateauY + 2.1, 0),
-		Material = Enum.Material.Grass,
-		Color = Color3.fromRGB(85, 150, 75),
-		CanCollide = false,
-	})
-	grassCap.Parent = folder
-
-	-- Stone pedestal for the tutorial coin, in the middle of the plateau.
-	local pedestal = newPart({
-		Name = "TutorialPedestal",
-		Size = Vector3.new(5, 2, 5),
-		Position = Vector3.new(cliffCenter.X + 10, plateauY + 3, 0),
-		Material = Enum.Material.Slate,
-		Color = Color3.fromRGB(100, 90, 80),
-	})
-	pedestal.Parent = folder
-
-	-- Floating spinning coin above the pedestal.
-	local coin = newPart({
-		Name = "TutorialCoin",
-		Size = Vector3.new(3, 3, 0.5),
-		CFrame = CFrame.new(pedestal.Position + Vector3.new(0, 4, 0)) * CFrame.Angles(0, 0, math.rad(90)),
-		Shape = Enum.PartType.Cylinder,
-		Material = Enum.Material.Neon,
-		Color = Color3.fromRGB(255, 220, 70),
-		CanCollide = false,
-	})
-	coin:SetAttribute("IsTutorialCoin", true)
-	coin:SetAttribute("Value", 10)
-	coin.Parent = folder
-
-	-- A coin glow light for visual pop.
-	local coinLight = Instance.new("PointLight")
-	coinLight.Brightness = 3
-	coinLight.Range = 15
-	coinLight.Color = Color3.fromRGB(255, 230, 120)
-	coinLight.Parent = coin
-
-	-- Wooden walkway stretching from the pedestal area toward the west edge.
-	-- This visually nudges the player toward the cliff edge.
-	local walkway = newPart({
-		Name = "Walkway",
-		Size = Vector3.new(18, 0.6, 6),
-		Position = Vector3.new(cliffCenter.X - 4, plateauY + 2.3, 0),
-		Material = Enum.Material.WoodPlanks,
-		Color = Color3.fromRGB(150, 110, 75),
-	})
-	walkway.Parent = folder
-
-	-- Two wooden railing posts at the edge — gives the "cliff lip" some shape.
-	for _, sign in ipairs({ -1, 1 }) do
-		local post = newPart({
-			Name = "EdgePost",
-			Size = Vector3.new(0.6, 4, 0.6),
-			Position = Vector3.new(cliffCenter.X - 15, plateauY + 4, sign * 4),
-			Material = Enum.Material.WoodPlanks,
-			Color = Color3.fromRGB(130, 90, 55),
+	if template then
+		local model = cloneIslandWith(template, {
+			parent = folder,
+			name = "IslandModel",
+			position = pos,
+			yRotation = math.rad(-30),
+			targetDiameter = 60,            -- small floating platform (player walks ~30 studs to step off)
+			hueShift = 0.04,
+			satShift = 0.06,
+			valShift = 0.04,
 		})
-		post.Parent = folder
+		centerCF, size = model:GetBoundingBox()
+	else
+		warn("[MapBuilder] No island template — falling back to procedural tutorial island.")
+		-- Fallback procedural island matches the previous design so the
+		-- world still loads if Owen hasn't placed the template yet.
+		local topY = pos.Y
+		local top = newPart({
+			Name = "ProcTop",
+			Size = Vector3.new(3, 30, 30),
+			Shape = Enum.PartType.Cylinder,
+			CFrame = CFrame.new(pos.X, topY - 1.5, pos.Z) * CFrame.Angles(0, 0, math.rad(90)),
+			Color = Color3.fromRGB(85, 175, 65),
+			CanCollide = true,
+		})
+		top.Parent = folder
+
+		local underYs = { topY - 4, topY - 8, topY - 12 }
+		local underDiams = { 26, 18, 10 }
+		for i, y in ipairs(underYs) do
+			local under = newPart({
+				Name = "ProcUnder_" .. i,
+				Size = Vector3.new(3, underDiams[i], underDiams[i]),
+				Shape = Enum.PartType.Cylinder,
+				CFrame = CFrame.new(pos.X, y, pos.Z) * CFrame.Angles(0, 0, math.rad(90)),
+				Color = Color3.fromRGB(125, 80, 50),
+				CanCollide = false,
+				CastShadow = i == 1,
+			})
+			under.Parent = folder
+		end
+		centerCF = CFrame.new(pos)
+		size = Vector3.new(30, 3, 30)
 	end
 
-	-- Sign post with a BillboardGui "JUMP!" marker above the cliff edge so the
-	-- player has a visual target without relying on the tutorial arrow alone.
-	local signPost = newPart({
-		Name = "SignPost",
-		Size = Vector3.new(0.8, 8, 0.8),
-		Position = Vector3.new(cliffCenter.X - 13, plateauY + 6, -8),
-		Material = Enum.Material.WoodPlanks,
-		Color = Color3.fromRGB(130, 90, 55),
+	-- IslandTop: a tiny invisible anchor part placed at the top-center of
+	-- whatever geometry was built. TutorialService.lua finds this part by
+	-- name and uses its position for the player-spawn teleport. Decoupling
+	-- "where to spawn" from "what part to render" means we can swap
+	-- island geometry freely without touching server code.
+	local topY = centerCF.Position.Y + size.Y / 2 - 1
+	local islandTop = newPart({
+		Name = "IslandTop",
+		Size = Vector3.new(2, 1, 2),
+		Position = Vector3.new(centerCF.Position.X, topY, centerCF.Position.Z),
+		Transparency = 1,
+		CanCollide = false,
+		CastShadow = false,
 	})
-	signPost.Parent = folder
+	islandTop.Parent = folder
 
-	local signGui = Instance.new("BillboardGui")
-	signGui.Size = UDim2.new(0, 120, 0, 50)
-	signGui.StudsOffset = Vector3.new(0, 4, 0)
-	signGui.AlwaysOnTop = false
-	signGui.MaxDistance = 400
-	signGui.Adornee = signPost
-	signGui.Parent = signPost
-
-	local signLabel = Instance.new("TextLabel")
-	signLabel.Size = UDim2.new(1, 0, 1, 0)
-	signLabel.BackgroundTransparency = 0.2
-	signLabel.BackgroundColor3 = Color3.fromRGB(80, 40, 20)
-	signLabel.TextColor3 = Color3.fromRGB(255, 220, 80)
-	signLabel.Font = Enum.Font.GothamBlack
-	signLabel.TextSize = 28
-	signLabel.Text = "JUMP!"
-	local corner = Instance.new("UICorner")
-	corner.CornerRadius = UDim.new(0, 8)
-	corner.Parent = signLabel
-	signLabel.Parent = signGui
-
-	-- Invisible trigger right at the west edge — fires when the player walks off.
-	local edgeTrigger = newPart({
-		Name = "TutorialLedgeEdge",
-		Size = Vector3.new(2, 10, 28),
-		Position = Vector3.new(cliffCenter.X - 14, plateauY + 5, 0),
+	-- LaunchEdge: invisible touch trigger covering the western edge of
+	-- the island in world space. Players walking off the west side
+	-- pass through it. (Position derived from the cloned-island bounding
+	-- box, so it works for any template size or rotation.)
+	local westEdgeX = centerCF.Position.X - size.X / 2
+	local launchEdge = newPart({
+		Name = "LaunchEdge",
+		Size = Vector3.new(2, 4, math.max(size.Z * 0.9, 8)),
+		Position = Vector3.new(westEdgeX + 1, topY + 2, centerCF.Position.Z),
 		Transparency = 1,
 		CanCollide = false,
 	})
-	edgeTrigger:SetAttribute("IsTutorialLedge", true)
-	edgeTrigger.Parent = folder
+	launchEdge:SetAttribute("IsLaunchEdge", true)
+	launchEdge.Parent = folder
 
-	-- Also keep a visible ledge part for the arrow to point at.
-	local ledge = newPart({
-		Name = "TutorialLedge",
-		Size = Vector3.new(2, 0.5, 10),
-		Position = Vector3.new(cliffCenter.X - 13, plateauY + 2.6, 0),
-		Material = Enum.Material.WoodPlanks,
-		Color = Color3.fromRGB(190, 140, 80),
-	})
-	ledge.Parent = folder
-
-	-- Landing trigger: an invisible volume floating just above the tree
-	-- island so any auto-glide that reaches the island fires the "landed"
-	-- event. The visible landing surface is the island grass below.
+	-- MainIslandLanding: huge invisible touch sensor floating just above
+	-- the main-island ground. Touching it = tutorial success. Sized big
+	-- so any plausible glide trajectory triggers it.
 	local landing = newPart({
-		Name = "TutorialLandingPad",
-		Size = Vector3.new(160, 12, 80),
-		Position = Vector3.new(50, 6, 0),
+		Name = "MainIslandLanding",
+		Size = Vector3.new(140, 4, 140),
+		Position = Vector3.new(0, 4, 0),
 		Transparency = 1,
 		CanCollide = false,
 	})
-	landing:SetAttribute("IsTutorialLanding", true)
+	landing:SetAttribute("IsMainIslandLanding", true)
 	landing.Parent = folder
 end
 
@@ -765,9 +926,37 @@ end
 -- All segments CanCollide=true. Wall panels are ~9.3 studs wide (slight
 -- overlap with neighbours so the ring seals without gaps) and 3 studs thick.
 ------------------------------------------------------------
+------------------------------------------------------------
+-- Tower-of-Hell phase palette. Each phase has its own neon-saturated
+-- color so players can read the floor at a glance from any distance.
+-- Used by buildTrunk for the central pillar, and by placeBranch as the
+-- default branch color when a section doesn't override it.
+------------------------------------------------------------
+local PHASE_COLORS = {
+	[1] = Color3.fromRGB(235, 55, 55),    -- punchy red base
+	[2] = Color3.fromRGB(255, 175, 30),   -- bright yellow-orange mid (was muddy)
+	[3] = Color3.fromRGB(60, 215, 90),    -- vivid green interior chamber
+	[4] = Color3.fromRGB(155, 90, 245),   -- saturated purple top
+}
+
+------------------------------------------------------------
+-- Tower-of-Hell tower (replaces the old wooden trunk).
+--
+-- Four stacked color zones, one per phase:
+--   * Phase 1 (Y=0..Phase1.YEnd)        red cylinder
+--   * Phase 2 (Phase1.YEnd..bandABottom) orange cylinder
+--   * Phase 3 panels (bandABottom..bandCTop) green wall panels with
+--                                       knot-hole gaps for the interior
+--   * Phase 4 (bandCTop..TreeHeight)    purple cylinder
+--
+-- The wall panels keep the Phase 3 interior obby intact (sealed middle
+-- band + knot-hole entry/exit at angles π/2 and 3π/2). Only the colors
+-- and material change vs. the old tree trunk; the structural geometry
+-- is unchanged so phase 3 still works.
+------------------------------------------------------------
 local function buildTrunk(parent: Instance)
 	local trunkFolder = Instance.new("Folder")
-	trunkFolder.Name = "Trunk"
+	trunkFolder.Name = "Tower"
 	trunkFolder.Parent = parent
 
 	local center = Config.Map.TreeCenter
@@ -775,71 +964,69 @@ local function buildTrunk(parent: Instance)
 	local treeH = Config.Map.TreeHeight
 	local wallThickness = 3
 
-	-- Knot band Y ranges. Band A contains the Phase 3 entry knot at angle π/2;
-	-- Band C contains the Phase 3 exit knot at angle 3π/2. The middle band is
-	-- a sealed ring around the interior so the player can't walk back out the
-	-- wrong side of the trunk after entering.
+	-- Knot band Y ranges (unchanged from the tree trunk — Phase 3 obby
+	-- still threads through these knot holes).
 	local bandABottom = Config.Map.Phase3.YStart - 1   -- 159
 	local bandATop    = Config.Map.Phase3.YStart + 9   -- 169
 	local bandCBottom = Config.Map.Phase3.YEnd - 7     -- 233
 	local bandCTop    = Config.Map.Phase3.YEnd + 3     -- 243
 
-	------------------------------------------------------------
-	-- Lower solid cylinder (Y=0 to entry band).
-	------------------------------------------------------------
-	local lowerH = bandABottom
-	local lower = newPart({
-		Name = "TrunkLower",
-		Size = Vector3.new(lowerH, r * 2, r * 2),
+	-- Phase 1 cylinder (red base, Y=0..Phase1.YEnd).
+	local p1H = Config.Map.Phase1.YEnd
+	local p1 = newPart({
+		Name = "TowerPhase1",
+		Size = Vector3.new(p1H, r * 2, r * 2),
 		Shape = Enum.PartType.Cylinder,
-		Material = Enum.Material.Wood,
-		Color = Color3.fromRGB(92, 60, 36),
-		CFrame = CFrame.new(center + Vector3.new(0, lowerH / 2, 0))
+		Color = PHASE_COLORS[1],
+		CFrame = CFrame.new(center + Vector3.new(0, p1H / 2, 0))
 			* CFrame.Angles(0, 0, math.rad(90)),
 		CanCollide = true,
 	})
-	lower.Parent = trunkFolder
-	addBark(lower)
+	p1.Parent = trunkFolder
 
-	------------------------------------------------------------
-	-- Upper solid cylinder (exit band top → tree top).
-	------------------------------------------------------------
-	local upperH = treeH - bandCTop
-	local upper = newPart({
-		Name = "TrunkUpper",
-		Size = Vector3.new(upperH, r * 2, r * 2),
+	-- Phase 2 cylinder (orange mid, Phase1.YEnd..bandABottom).
+	local p2Bottom = Config.Map.Phase1.YEnd
+	local p2H = bandABottom - p2Bottom
+	local p2 = newPart({
+		Name = "TowerPhase2",
+		Size = Vector3.new(p2H, r * 2, r * 2),
 		Shape = Enum.PartType.Cylinder,
-		Material = Enum.Material.Wood,
-		Color = Color3.fromRGB(95, 63, 38),
-		CFrame = CFrame.new(center + Vector3.new(0, bandCTop + upperH / 2, 0))
+		Color = PHASE_COLORS[2],
+		CFrame = CFrame.new(center + Vector3.new(0, p2Bottom + p2H / 2, 0))
 			* CFrame.Angles(0, 0, math.rad(90)),
 		CanCollide = true,
 	})
-	upper.Parent = trunkFolder
-	addBark(upper)
+	p2.Parent = trunkFolder
+
+	-- Phase 4 cylinder (purple top, bandCTop..treeH).
+	local p4H = treeH - bandCTop
+	local p4 = newPart({
+		Name = "TowerPhase4",
+		Size = Vector3.new(p4H, r * 2, r * 2),
+		Shape = Enum.PartType.Cylinder,
+		Color = PHASE_COLORS[4],
+		CFrame = CFrame.new(center + Vector3.new(0, bandCTop + p4H / 2, 0))
+			* CFrame.Angles(0, 0, math.rad(90)),
+		CanCollide = true,
+	})
+	p4.Parent = trunkFolder
 
 	------------------------------------------------------------
-	-- Ring-band helper: 16 arc-tangent wall panels; optional angular gap.
+	-- Phase 3 wall panels (green ring with knot-hole gaps).
 	------------------------------------------------------------
 	local PANEL_COUNT = 16
 	local panelAngSize = (2 * math.pi) / PANEL_COUNT
-	-- ~56° opening. Arc chord at r=22 ≈ 20 studs — plenty to walk through.
 	local GAP_HALF_ANGLE = math.rad(28)
 
 	local function ringBand(yLow: number, yHigh: number, gapAngle: number?, nameSuffix: string)
 		local h = yHigh - yLow
 		local yMid = (yLow + yHigh) / 2
-		-- Panel outer face should sit at r; panel thickness is radial, so the
-		-- panel center is at r - wallThickness/2.
 		local centerR = r - wallThickness / 2
-		-- Tangential width: the chord across the arc segment plus a small overlap
-		-- (1.08x) so adjacent panels seal without visible seams.
 		local panelW = panelAngSize * r * 1.08
 
 		for i = 0, PANEL_COUNT - 1 do
 			local ang = i * panelAngSize
 			if gapAngle then
-				-- Angular distance from this panel to the gap center, wrapped to [-π, π].
 				local d = ((ang - gapAngle) + math.pi) % (2 * math.pi) - math.pi
 				if math.abs(d) < GAP_HALF_ANGLE then
 					continue
@@ -847,35 +1034,40 @@ local function buildTrunk(parent: Instance)
 			end
 			local pos = center + Vector3.new(math.cos(ang) * centerR, yMid, math.sin(ang) * centerR)
 			local panel = newPart({
-				Name = "TrunkPanel_" .. nameSuffix .. "_" .. i,
+				Name = "TowerPanel_" .. nameSuffix .. "_" .. i,
 				Size = Vector3.new(panelW, h, wallThickness),
-				-- Rotate so the panel's outer face (+Z local) points radially outward.
 				CFrame = CFrame.new(pos) * CFrame.Angles(0, math.pi / 2 - ang, 0),
-				Material = Enum.Material.Wood,
-				-- Subtle per-panel color variation for a more organic look.
-				Color = Color3.fromRGB(88 + (i % 3) * 4, 58 + (i % 2) * 4, 34 + (i % 4) * 3),
+				-- Slight per-panel hue variation around green for visual depth.
+				Color = tintShift(PHASE_COLORS[3], ((i * 13) % 7 - 3) / 100, 0, ((i * 7) % 5 - 2) / 50),
 				CanCollide = true,
 			})
-
-			-- Bark texture on the outward face only (saves 3 textures per panel).
-			local tex = Instance.new("Texture")
-			tex.Texture = "rbxassetid://6372755229"
-			tex.Face = Enum.NormalId.Front
-			tex.StudsPerTileU = 12
-			tex.StudsPerTileV = 12
-			tex.Transparency = 0.1
-			tex.Parent = panel
-
 			panel.Parent = trunkFolder
 		end
 	end
 
-	-- Band A (entry knot band, hole at +Z).
 	ringBand(bandABottom, bandATop, math.pi / 2, "EntryBand")
-	-- Band B (sealed middle — wraps the Phase 3 interior).
 	ringBand(bandATop, bandCBottom, nil, "MidBand")
-	-- Band C (exit knot band, hole at -Z).
 	ringBand(bandCBottom, bandCTop, 3 * math.pi / 2, "ExitBand")
+
+	------------------------------------------------------------
+	-- Glowing seam rings between phases. White Neon discs slightly
+	-- wider than the tower so they ring around each phase boundary —
+	-- gives the silhouette visual rhythm and reads as "you've crossed
+	-- into a new floor" cleanly. Three seams: P1↔P2, P2↔P3, P3↔P4.
+	------------------------------------------------------------
+	local seamY = { Config.Map.Phase1.YEnd, bandABottom, bandCTop }
+	local seamR = r + 1.5
+	for i, y in ipairs(seamY) do
+		local seam = newPart({
+			Name = "PhaseSeam_" .. i,
+			Size = Vector3.new(2.2, seamR * 2, seamR * 2),
+			Shape = Enum.PartType.Cylinder,
+			CFrame = CFrame.new(center + Vector3.new(0, y, 0)) * CFrame.Angles(0, 0, math.rad(90)),
+			Color = Color3.fromRGB(245, 250, 255),
+			CanCollide = false,
+		})
+		seam.Parent = trunkFolder
+	end
 end
 
 ------------------------------------------------------------
@@ -907,11 +1099,328 @@ end
 
 ------------------------------------------------------------
 -- Phase 1 — Root Ascendance
--- 16 platforms over 1.5 turns at r=26 → chord ≈ 16.1 studs (~1.5x wider than
--- the previous 24-platform pass). Vertical rise ≈ 4.8 studs per platform.
--- Every 6th platform is a FadingLeaf, every 8th is a checkpoint.
--- Coins float directly above every other platform so they're scooped up as
--- the player lands on each jump.
+--
+-- Section-based obby modeled on MutatorMayhem's modular section
+-- registry. Each section is a self-contained chunk of climb (~15-22
+-- studs vertical) demonstrating one mechanic:
+--
+--   1. JumpBranches      — Pillars. Stepping branches you hop between.
+--   2. CrumbleLeaves     — CrumbleTiles. Leaf branches that fade + drop
+--                          0.4s after you touch them. Must keep moving.
+--   3. PendulumGauntlet  — Pendulums. Branches between two swinging
+--                          wrecking-vines that knock you off-balance.
+--
+-- All sections wrap around the OUTSIDE of the trunk in a continuous
+-- spiral. Phase 3 will use the inside-the-trunk hollow zone for an
+-- "interior climb" set of sections; Phase 2 + Phase 4 still use legacy
+-- platforms until I rebuild them in subsequent passes.
+--
+-- Every branch is a 6-stud-thick cylinder cFramed radially out of the
+-- trunk surface, walkable on top. Stud texture + Plastic material +
+-- saturated colors come for free via the newPart helper at the top of
+-- the file.
+------------------------------------------------------------
+
+-- Shared helper: place a flat glowing platform sticking radially out of
+-- the tower at (angle, y). Returns the platform Part. Replaced the old
+-- cylinder-branch helper — branches were tree-themed and didn't fit the
+-- Tower-of-Hell look. Now the player walks on a flat slab whose top
+-- surface is well-defined, no curved-cylinder balancing.
+--
+-- Geometry:
+--   * Reach (radial extent) — derived from `outerR` legacy arg
+--   * Width (tangential)    — from legacy `diameter` arg, default 9
+--   * Thickness             — fixed 1.5; flat ledge
+--
+-- Material is forced to Neon so the platform glows in its phase color —
+-- the headline "stepping pad of pure light" ToH visual.
+local function placeBranch(opts: {
+	parent: Instance,
+	center: Vector3,
+	angle: number,
+	y: number,
+	name: string,
+	color: Color3?,        -- optional; defaults to PHASE_COLORS[opts.phase]
+	hazardAttr: string?,   -- "FadingLeaf" / "Pendulum" / etc.
+	isCheckpoint: boolean?,
+	coinsFolder: Folder?,  -- legacy, no-op
+	withCoin: boolean?,    -- legacy, no-op
+	diameter: number?,     -- tangential width (default 9, pass 5 for narrow)
+	outerR: number?,       -- outer radius of slab tip (default 30)
+	phase: number?,        -- attribute for telemetry / drives default color (default 1)
+}): Part
+	local trunkR = Config.Map.TreeTrunkRadius        -- 22
+	local outerR = opts.outerR or 30
+	local reach = math.max(outerR - trunkR, 4)        -- radial extent
+	local width = opts.diameter or 9                  -- tangential width
+	local thickness = 1.5
+
+	-- Slab center at midpoint of (trunkR, outerR), Y offset so the TOP
+	-- face sits at opts.y + 0.5 (preserves old plank-top jump heights).
+	local centerR = (trunkR + outerR) / 2
+	local pos = ringPos(opts.center, centerR, opts.angle, opts.y - thickness / 2 + 0.5)
+
+	local phaseNum = opts.phase or 1
+	local color = opts.color or PHASE_COLORS[phaseNum] or Color3.fromRGB(140, 95, 60)
+	if opts.isCheckpoint then color = Color3.fromRGB(80, 230, 255) end
+
+	local platform = newPart({
+		Name = opts.name,
+		Size = Vector3.new(reach, thickness, width),
+		-- Rotate so local +X axis points radially outward at this angle.
+		CFrame = CFrame.new(pos) * CFrame.Angles(0, -opts.angle, 0),
+		Color = color,
+		CanCollide = true,
+	})
+	platform:SetAttribute("Phase", phaseNum)
+	if opts.hazardAttr then platform:SetAttribute(opts.hazardAttr, true) end
+	if opts.isCheckpoint then platform:SetAttribute("IsCheckpoint", true) end
+	-- Material stays Plastic (newPart's default). Per Owen's rule:
+	-- nothing in the world is Neon except parts that kill the player.
+	platform.Parent = opts.parent
+
+	return platform
+end
+
+-- Pendulum hazard helper: a swinging log on a vertical pivot. Uses the
+-- existing HazardService Pendulum binding (CFrame-driven on Heartbeat,
+-- kills on touch). Pivot Y is `pivotY` above the section midline; arm
+-- length controls how far down the swing reaches.
+local function placePendulum(opts: {
+	parent: Instance,
+	pivot: Vector3,
+	arm: number,
+	period: number,
+	phaseOffset: number,
+	logSize: Vector3?,
+	name: string,
+})
+	local size = opts.logSize or Vector3.new(2.6, 2.6, 8)
+	local hangPos = opts.pivot + Vector3.new(0, -opts.arm, 0)
+	local log = newPart({
+		Name = opts.name,
+		Size = size,
+		Position = hangPos,
+		Color = Color3.fromRGB(245, 250, 255),
+		CanCollide = false,
+	})
+	log:SetAttribute("Pendulum", true)
+	log:SetAttribute("PivotX", opts.pivot.X)
+	log:SetAttribute("PivotY", opts.pivot.Y)
+	log:SetAttribute("PivotZ", opts.pivot.Z)
+	log:SetAttribute("ArmLength", opts.arm)
+	log:SetAttribute("Period", opts.period)
+	log:SetAttribute("PhaseOffset", opts.phaseOffset)
+	-- Pendulums kill on touch — neon white per Owen's "kill = neon white" rule.
+	log.Material = Enum.Material.Neon
+	log.Color = Color3.fromRGB(245, 250, 255)
+	log.Parent = opts.parent
+end
+
+------------------------------------------------------------
+-- Section: Ladder
+-- A vertical TrussPart at angleStart that the player climbs straight up.
+-- The truss spans (yStart, yEnd) AND yEnd is the same Y the next
+-- section's first platform sits at — so the truss top transitions
+-- directly onto the next section's landing. No separate top platform
+-- (the previous version had it overlapping both the truss and the next
+-- section's first slab, which read as a ladder going to nothing).
+-- Returns angleStart unchanged: ladders go vertical only.
+-- MutatorMayhem reference: ColumnHop / WallJumps.
+------------------------------------------------------------
+local function section_Ladder(parent, center, coinsFolder, yStart, yEnd, angleStart, phase): number
+	local trunkR = Config.Map.TreeTrunkRadius
+	-- Truss center sits 1.5 studs out from the trunk surface so the
+	-- player has room to grip without clipping into the tower wall.
+	local trussR = trunkR + 1.5
+	local trussCenter = ringPos(center, trussR, angleStart, (yStart + yEnd) / 2)
+	local trussHeight = yEnd - yStart
+
+	local truss = Instance.new("TrussPart")
+	truss.Name = "S_Ladder_P" .. (phase or 1)
+	truss.Anchored = true
+	truss.Style = Enum.Style.AlternatingSupports
+	truss.Size = Vector3.new(2, trussHeight, 2)
+	truss.Position = trussCenter
+	truss.Color = PHASE_COLORS[phase or 1] or Color3.fromRGB(150, 150, 150)
+	truss.Parent = parent
+
+	return angleStart
+end
+
+------------------------------------------------------------
+-- Section: WallJump
+-- Two columns of small platforms at slightly offset angles around
+-- angleStart. Player alternates left → right → left as they climb.
+-- Forces a different movement pattern than the spiral — you're going
+-- straight up, not around the tower.
+-- MutatorMayhem reference: WallJumps.
+------------------------------------------------------------
+local function section_WallJump(parent, center, coinsFolder, yStart, yEnd, angleStart, phase): number
+	local count = 6
+	local columnDelta = 0.16     -- ~9° angular offset for each column
+	for i = 0, count - 1 do
+		local t = i / (count - 1)
+		local angle = angleStart + ((i % 2 == 0) and -columnDelta or columnDelta)
+		local y = yStart + t * (yEnd - yStart)
+		placeBranch({
+			parent = parent, center = center, coinsFolder = coinsFolder,
+			angle = angle, y = y,
+			name = "S_Wall_P" .. (phase or 1) .. "_" .. i,
+			phase = phase,
+			diameter = 5,        -- narrow precision platform
+			outerR = 28,         -- closer to trunk than the default 30
+			isCheckpoint = (i == count - 1),
+		})
+	end
+	return angleStart           -- WallJump goes vertical, no angular progress
+end
+
+------------------------------------------------------------
+-- Section: FloatingDiscs
+-- 4 free-floating disc platforms at angles around the tower, NOT touching
+-- the tower's surface. Player has to jump between them across open air.
+-- Discs are small and high-contrast so they read as standalone targets.
+-- MutatorMayhem reference: SteppingStones.
+------------------------------------------------------------
+local function section_FloatingDiscs(parent, center, coinsFolder, yStart, yEnd, angleStart, phase): number
+	local count = 4
+	local angleSpan = math.pi * 0.45
+	for i = 0, count - 1 do
+		local t = i / (count - 1)
+		local angle = angleStart + t * angleSpan
+		local y = yStart + t * (yEnd - yStart)
+		-- Floating disc: cylinder shape, far from the trunk surface,
+		-- standalone island of platform.
+		local discPos = ringPos(center, 38, angle, y)  -- well outside trunk r=22
+		local disc = newPart({
+			Name = "S_Disc_P" .. (phase or 1) .. "_" .. i,
+			Size = Vector3.new(1.5, 7, 7),
+			Shape = Enum.PartType.Cylinder,
+			CFrame = CFrame.new(discPos) * CFrame.Angles(0, 0, math.rad(90)),
+			Color = PHASE_COLORS[phase or 1],
+			CanCollide = true,
+		})
+		disc:SetAttribute("Phase", phase or 1)
+		if i == count - 1 then
+			disc:SetAttribute("IsCheckpoint", true)
+			disc.Color = Color3.fromRGB(80, 230, 255)
+		end
+		disc.Parent = parent
+	end
+	return angleStart + angleSpan
+end
+
+------------------------------------------------------------
+-- Section 1: JumpBranches
+-- 5 simple stepping branches in a quarter-spiral, gradually climbing.
+-- Warms the player into the obby — no hazards, just timing jumps.
+-- MutatorMayhem reference: Pillars, DoubleGap.
+------------------------------------------------------------
+local function section_JumpBranches(parent, center, coinsFolder, yStart, yEnd, angleStart): number
+	local count = 5
+	local angleSpan = math.pi * 0.6
+	for i = 0, count - 1 do
+		local t = i / (count - 1)
+		local angle = angleStart + t * angleSpan
+		local y = yStart + t * (yEnd - yStart)
+		placeBranch({
+			parent = parent, center = center, coinsFolder = coinsFolder,
+			angle = angle, y = y,
+			name = "S1_Jump_" .. i,
+			withCoin = (i % 2 == 1),
+			isCheckpoint = (i == count - 1),  -- last branch in section is checkpoint
+		})
+	end
+	return angleStart + angleSpan
+end
+
+------------------------------------------------------------
+-- Section 2: CrumbleLeaves
+-- 5 mossy-green branches that fade and drop 0.4s after you touch them
+-- (FadingLeaf attribute → HazardService respawns after 6s). Keep moving
+-- or fall.
+-- MutatorMayhem reference: CrumbleTiles.
+------------------------------------------------------------
+local function section_CrumbleLeaves(parent, center, coinsFolder, yStart, yEnd, angleStart): number
+	local count = 5
+	local angleSpan = math.pi * 0.55
+	for i = 0, count - 1 do
+		local t = i / (count - 1)
+		local angle = angleStart + t * angleSpan
+		local y = yStart + t * (yEnd - yStart)
+		placeBranch({
+			parent = parent, center = center, coinsFolder = coinsFolder,
+			angle = angle, y = y,
+			name = "S2_Crumble_" .. i,
+			color = Color3.fromRGB(85, 165, 60),
+			hazardAttr = "FadingLeaf",
+			withCoin = (i == 1 or i == 3),  -- bonus coins for risk-takers
+		})
+	end
+	return angleStart + angleSpan
+end
+
+------------------------------------------------------------
+-- Section 3: PendulumGauntlet
+-- 4 stepping branches with 2 wrecking-vine pendulums swinging across
+-- the path between them. Pendulums knock the player off-balance (handled
+-- by HazardService — TakeDamage(MaxHealth) on touch). The trick is
+-- timing the swing.
+-- MutatorMayhem reference: Pendulums.
+------------------------------------------------------------
+local function section_PendulumGauntlet(parent, center, coinsFolder, yStart, yEnd, angleStart): number
+	local count = 4
+	local angleSpan = math.pi * 0.5
+	-- Place the 4 walking branches first.
+	for i = 0, count - 1 do
+		local t = i / (count - 1)
+		local angle = angleStart + t * angleSpan
+		local y = yStart + t * (yEnd - yStart)
+		placeBranch({
+			parent = parent, center = center, coinsFolder = coinsFolder,
+			angle = angle, y = y,
+			name = "S3_Walk_" .. i,
+			withCoin = (i == 1 or i == 3),
+			isCheckpoint = (i == count - 1),  -- end of phase = checkpoint
+		})
+	end
+
+	-- 2 pendulums at t=0.33 and t=0.66 — between branches, not on top.
+	-- HazardService picks these up via the Pendulum attribute and swings
+	-- them on Heartbeat.
+	for j = 1, 2 do
+		local t = j / 3
+		local pivotAngle = angleStart + t * angleSpan
+		local pivotY = yStart + t * (yEnd - yStart) + 18  -- pivot 18 studs above the branch
+		local pivot = ringPos(center, 30, pivotAngle, pivotY)
+		local arm = 14
+		-- Initial position: hangs directly below the pivot.
+		local hangPos = pivot + Vector3.new(0, -arm, 0)
+		local log = newPart({
+			Name = "S3_Vine_" .. j,
+			Size = Vector3.new(2.6, 2.6, 8),  -- chunky log shape
+			Position = hangPos,
+			Color = Color3.fromRGB(45, 30, 18),  -- dark vine wood
+			CanCollide = false,                  -- HazardService kills on touch instead
+		})
+		log:SetAttribute("Pendulum", true)
+		log:SetAttribute("PivotX", pivot.X)
+		log:SetAttribute("PivotY", pivot.Y)
+		log:SetAttribute("PivotZ", pivot.Z)
+		log:SetAttribute("ArmLength", arm)
+		log:SetAttribute("Period", 2.4)
+		log:SetAttribute("PhaseOffset", j * math.pi)  -- two pendulums swing opposite each other
+		log.Parent = parent
+	end
+
+	return angleStart + angleSpan
+end
+
+------------------------------------------------------------
+-- Phase 1 orchestrator. Stacks the three sections vertically along the
+-- trunk in a continuous outward spiral, with their angle ranges chained
+-- so the player wraps around the trunk as they climb.
 ------------------------------------------------------------
 local function buildPhase1(parent: Instance)
 	local folder = Instance.new("Folder")
@@ -923,132 +1432,198 @@ local function buildPhase1(parent: Instance)
 	local yStart = Config.Map.Phase1.YStart
 	local yEnd = Config.Map.Phase1.YEnd
 
-	-- Decorative swamp water ring around the trunk.
+	-- Ground-level swamp + hidden trap kept from the legacy phase. They
+	-- live BELOW the first section, so they're decoration the player
+	-- never directly walks on.
 	local swamp = newPart({
 		Name = "SwampWater",
 		Size = Vector3.new(100, 0.4, 100),
 		Position = center + Vector3.new(0, 0.3, 0),
-		Material = Enum.Material.Water,
 		Color = Color3.fromRGB(60, 80, 60),
 		Transparency = 0.2,
 		CanCollide = false,
 	})
 	swamp.Parent = folder
 
-	-- Hidden kill brick under murky water, just off the main path.
 	local trap = newPart({
 		Name = "HiddenTrap",
 		Size = Vector3.new(5, 0.4, 5),
 		Position = center + Vector3.new(-Config.Map.TreeTrunkRadius - 18, 0.2, -26),
-		Material = Enum.Material.Slate,
-		Color = Color3.fromRGB(35, 50, 40),
+		Color = Color3.fromRGB(245, 250, 255),
 		Transparency = 0.4,
 	})
 	trap:SetAttribute("IsKillBrick", true)
+	-- Kill brick → neon white (Owen's "kill = neon white" rule).
+	trap.Material = Enum.Material.Neon
+	trap.Color = Color3.fromRGB(245, 250, 255)
 	trap.Parent = folder
 
-	local platformCount = 16
-	local turns = 1.5
-	local yRise = yEnd - yStart - 4
-	local r = Config.Map.TreeTrunkRadius + 4
-	-- Start the spiral on the +Z side so it connects directly to the TreeEntry.
-	local startAngle = math.pi / 2
-	for i = 0, platformCount - 1 do
-		local t = i / (platformCount - 1)
-		local angle = startAngle + t * turns * math.pi * 2
-		local y = yStart + 3 + t * yRise
-		local pos = ringPos(center, r, angle, y)
+	-- Heavy ladder cadence — a ladder between (almost) every main
+	-- section so the climb breaks up between vertical and angular
+	-- progress every ~10 studs. 5 ladder segments in Phase 1 alone.
+	local angle = math.pi / 2  -- start on +Z side, lined up with TreeEntry
+	angle = section_Ladder         (folder, center, coinsFolder, yStart + 3,  yStart + 11, angle, 1)
+	angle = section_JumpBranches   (folder, center, coinsFolder, yStart + 11, yStart + 22, angle)
+	angle = section_Ladder         (folder, center, coinsFolder, yStart + 22, yStart + 30, angle, 1)
+	angle = section_CrumbleLeaves  (folder, center, coinsFolder, yStart + 30, yStart + 42, angle)
+	angle = section_Ladder         (folder, center, coinsFolder, yStart + 42, yStart + 50, angle, 1)
+	angle = section_FloatingDiscs  (folder, center, coinsFolder, yStart + 50, yStart + 58, angle, 1)
+	angle = section_Ladder         (folder, center, coinsFolder, yStart + 58, yStart + 66, angle, 1)
+	angle = section_PendulumGauntlet(folder, center, coinsFolder, yStart + 66, yEnd - 4, angle)
+end
 
-		-- Shape variant cycles every platform so the spiral looks like hand-crafted
-		-- carpentry rather than 16 identical planks. All variants share a ~1-stud
-		-- vertical thickness so the top surface stays at pos.Y + 0.5 and jump
-		-- physics remain predictable.
-		local shapeVariant = i % 3
-		local step
-		if shapeVariant == 0 then
-			-- Rectangular wooden plank tangent to the spiral path.
-			step = newPart({
-				Name = "SpiralStep_P1_" .. i,
-				Size = Vector3.new(9, 1, 7),
-				CFrame = CFrame.new(pos) * CFrame.Angles(0, angle + math.rad(90), 0),
-				Material = Enum.Material.WoodPlanks,
-				Color = Color3.fromRGB(120, 80, 50),
-			})
-		elseif shapeVariant == 1 then
-			-- Round cross-cut tree-ring disc (looks like a sliced log).
-			step = newPart({
-				Name = "SpiralStep_P1_" .. i,
-				Size = Vector3.new(1, 8.5, 8.5),
-				Shape = Enum.PartType.Cylinder,
-				CFrame = CFrame.new(pos) * CFrame.Angles(0, 0, math.rad(90)),
-				Material = Enum.Material.Wood,
-				Color = Color3.fromRGB(108, 76, 48),
-			})
-		else
-			-- Hexagonal-feel wide slab, rotated ~25° off the spiral tangent so
-			-- its corners jut forward/backward like a natural stump.
-			step = newPart({
-				Name = "SpiralStep_P1_" .. i,
-				Size = Vector3.new(8, 1, 8),
-				CFrame = CFrame.new(pos)
-					* CFrame.Angles(0, angle + math.rad(90) + math.rad(25), 0),
-				Material = Enum.Material.Wood,
-				Color = Color3.fromRGB(115, 82, 52),
-			})
-		end
-		step:SetAttribute("Phase", 1)
-
-		-- Every 6th platform is a fading-leaf hazard (same position, different look).
-		if i > 0 and i % 6 == 0 then
-			step.Name = "SpiralLeaf_P1_" .. i
-			step.Material = Enum.Material.Grass
-			step.Color = Color3.fromRGB(70, 150, 55)
-			step:SetAttribute("FadingLeaf", true)
-		end
-		-- Every 8th platform is a glowing checkpoint.
-		if i > 0 and i % 8 == 0 then
-			step.Material = Enum.Material.Neon
-			step.Color = Color3.fromRGB(80, 200, 220)
-			step:SetAttribute("IsCheckpoint", true)
-		end
-
-		step.Parent = folder
-
-		-- Decorate only the "normal" planks so hazards (green leaves) and
-		-- checkpoints (glowing neon) keep their distinct read-at-a-glance look.
-		if not step:GetAttribute("FadingLeaf") and not step:GetAttribute("IsCheckpoint") then
-			decorPhase1Plank(step, i, angle, folder)
-		end
-
-		-- Aligned coin on every other platform (odd indices avoid coins on hazards/checkpoints).
-		if coinsFolder and i % 2 == 1 then
-			local coin = newPart({
-				Name = "Coin",
-				Size = Vector3.new(2, 2, 0.4),
-				CFrame = CFrame.new(pos + Vector3.new(0, 3, 0))
-					* CFrame.Angles(0, angle, math.rad(90)),
-				Shape = Enum.PartType.Cylinder,
-				Material = Enum.Material.Neon,
-				Color = Color3.fromRGB(255, 210, 60),
-				CanCollide = false,
-			})
-			coin:SetAttribute("Value", Config.Map.CoinValue)
-			coin:SetAttribute("Phase", 1)
-			coin.Parent = coinsFolder
-		end
+------------------------------------------------------------
+-- Section 4: NarrowJumps (Phase 2 opener)
+-- 5 thin (4-stud diameter) branches in a partial spiral. Same length as
+-- Phase 1's JumpBranches but the curved walking surface is much
+-- narrower — the comfort zone shrinks from ~5 studs to ~3. Step-up in
+-- difficulty without adding a hazard yet.
+-- MutatorMayhem reference: NarrowBeam, TightRope.
+------------------------------------------------------------
+local function section_NarrowJumps(parent, center, coinsFolder, yStart, yEnd, angleStart): number
+	local count = 5
+	local angleSpan = math.pi * 0.5
+	for i = 0, count - 1 do
+		local t = i / (count - 1)
+		local angle = angleStart + t * angleSpan
+		local y = yStart + t * (yEnd - yStart)
+		placeBranch({
+			parent = parent, center = center, coinsFolder = coinsFolder,
+			angle = angle, y = y,
+			name = "S4_Narrow_" .. i,
+			diameter = 4,         -- ← tighter walking surface
+			withCoin = (i == 1 or i == 3),
+			phase = 2,
+		})
 	end
+	return angleStart + angleSpan
+end
+
+------------------------------------------------------------
+-- Section 5: CrumblePendulum (Phase 2 mid)
+-- 5 fading-leaf branches with one swinging pendulum sweeping through
+-- the middle of the run. Combines two hazard families — the Crumble
+-- forces forward momentum, the Pendulum demands timing. Twice as
+-- punishing as either alone.
+-- MutatorMayhem reference: CrumbleTiles + Pendulums combo.
+------------------------------------------------------------
+local function section_CrumblePendulum(parent, center, coinsFolder, yStart, yEnd, angleStart): number
+	local count = 5
+	local angleSpan = math.pi * 0.55
+	for i = 0, count - 1 do
+		local t = i / (count - 1)
+		local angle = angleStart + t * angleSpan
+		local y = yStart + t * (yEnd - yStart)
+		placeBranch({
+			parent = parent, center = center, coinsFolder = coinsFolder,
+			angle = angle, y = y,
+			name = "S5_Crumble_" .. i,
+			color = Color3.fromRGB(78, 158, 55),
+			hazardAttr = "FadingLeaf",
+			withCoin = (i == 2),
+			phase = 2,
+		})
+	end
+	-- One pendulum sweeping at the section midpoint, slow + wide so it
+	-- catches a rushing player.
+	local pivotAngle = angleStart + angleSpan * 0.5
+	local pivotY = (yStart + yEnd) * 0.5 + 18
+	placePendulum({
+		parent = parent,
+		pivot = ringPos(center, 30, pivotAngle, pivotY),
+		arm = 14,
+		period = 2.6,
+		phaseOffset = 0,
+		name = "S5_Vine",
+	})
+	return angleStart + angleSpan
+end
+
+------------------------------------------------------------
+-- Section 6: TripleSwing (Phase 2 hard)
+-- 4 walking branches surrounded by 3 pendulums all at different phase
+-- offsets so the swing pattern is chaotic — there's never a "safe"
+-- moment, only timing windows. The hardest section of Phase 2.
+-- MutatorMayhem reference: pendulum stacking from the late-game pool.
+------------------------------------------------------------
+local function section_TripleSwing(parent, center, coinsFolder, yStart, yEnd, angleStart): number
+	local count = 4
+	local angleSpan = math.pi * 0.5
+	for i = 0, count - 1 do
+		local t = i / (count - 1)
+		local angle = angleStart + t * angleSpan
+		local y = yStart + t * (yEnd - yStart)
+		placeBranch({
+			parent = parent, center = center, coinsFolder = coinsFolder,
+			angle = angle, y = y,
+			name = "S6_Walk_" .. i,
+			withCoin = (i == 1 or i == 2),
+			phase = 2,
+		})
+	end
+	-- 3 pendulums at t=0.25 / 0.5 / 0.75, all with different periods +
+	-- phase offsets so they never sync up — chaos ladder.
+	local periods = { 2.2, 2.6, 3.0 }
+	local offsets = { 0, math.pi * 0.66, math.pi * 1.33 }
+	for j = 1, 3 do
+		local t = j / 4
+		local pivotAngle = angleStart + t * angleSpan
+		local pivotY = yStart + t * (yEnd - yStart) + 18
+		placePendulum({
+			parent = parent,
+			pivot = ringPos(center, 30, pivotAngle, pivotY),
+			arm = 14,
+			period = periods[j],
+			phaseOffset = offsets[j],
+			name = "S6_Vine_" .. j,
+		})
+	end
+	return angleStart + angleSpan
+end
+
+------------------------------------------------------------
+-- Section 7: KnotApproach (Phase 2 closer)
+-- 3 branches steering the player toward the Phase 3 knot-hole entry on
+-- the +Z side of the trunk. Final branch is a checkpoint and sits
+-- right next to the trunk panel gap at angle π/2. From there a short
+-- vine truss climbs to the actual knot-hole entry at Y=164.
+------------------------------------------------------------
+local function section_KnotApproach(parent, center, coinsFolder, yStart, yEnd, angleEnd): number
+	-- Approach angle is the END angle (knot entry), so we compute backwards.
+	-- 3 branches stepping into the knot-hole approach.
+	local count = 3
+	local angleSpan = math.pi * 0.35
+	local angleStart = angleEnd - angleSpan
+	for i = 0, count - 1 do
+		local t = i / (count - 1)
+		local angle = angleStart + t * angleSpan
+		local y = yStart + t * (yEnd - yStart)
+		placeBranch({
+			parent = parent, center = center, coinsFolder = coinsFolder,
+			angle = angle, y = y,
+			name = "S7_Approach_" .. i,
+			withCoin = (i == 1),
+			isCheckpoint = (i == count - 1),  -- last branch = checkpoint right by knot entry
+			phase = 2,
+		})
+	end
+	return angleEnd
 end
 
 ------------------------------------------------------------
 -- Phase 2 — Canopy Perils
--- Spiral continuation from Phase 1's end angle. 16 platforms over 1.5 turns
--- at r=26 → chord ≈ 16.1 studs. Three pendulum logs sweep across the jump
--- arc at t = 0.25 / 0.5 / 0.75; four radial detour branches carry bonus
--- coins at t = 0.2 / 0.4 / 0.6 / 0.8. Main-path coins float above every
--- other spiral platform. Ends at a vine truss climbing to the Phase 3
--- knot entry.
+--
+-- Section-based hard tier. Each section is harder than its Phase 1
+-- counterpart: NarrowJumps (thinner branches than Phase 1's chunky
+-- ones) → CrumblePendulum (Phase 1's two hazards combined) →
+-- TripleSwing (3 chaotic pendulums on simultaneous offset phases) →
+-- KnotApproach (steers the player to the Phase 3 knot-hole entry).
+--
+-- All sections still wrap around the OUTSIDE of the trunk (Owen's
+-- "branch obby outside, harder higher" rule). Phase 3's interior obby
+-- starts at the knot hole at Y=164, angle π/2.
 ------------------------------------------------------------
-local function buildPhase2(parent: Instance)
+local function buildPhase2_LEGACY_DEAD(parent: Instance)
 	local folder = Instance.new("Folder")
 	folder.Name = "Phase2_Canopy"
 	folder.Parent = parent
@@ -1108,7 +1683,7 @@ local function buildPhase2(parent: Instance)
 
 		-- Every 6th platform is a checkpoint.
 		if i > 0 and i % 6 == 0 then
-			plat.Material = Enum.Material.Neon
+			plat.Material = Enum.Material.Plastic
 			plat.Color = Color3.fromRGB(80, 200, 220)
 			plat:SetAttribute("IsCheckpoint", true)
 		end
@@ -1233,6 +1808,62 @@ local function buildPhase2(parent: Instance)
 	vineTop.Parent = folder
 end
 
+-- New section-based Phase 2. Replaces the legacy 16-platform spiral
+-- above. Stacks four progressively-harder sections vertically, ending
+-- at a checkpoint right next to the Phase 3 knot-hole entry.
+local function buildPhase2(parent: Instance)
+	local folder = Instance.new("Folder")
+	folder.Name = "Phase2_Canopy"
+	folder.Parent = parent
+
+	local coinsFolder = parent:FindFirstChild("Coins") :: Folder?
+	local center = Config.Map.TreeCenter
+	local yStart = Config.Map.Phase2.YStart
+	local yEnd = Config.Map.Phase2.YEnd
+
+	-- Heavy ladder cadence — 4 ladder segments interleaved with
+	-- horizontal sections. KnotApproach at the end pivots to
+	-- math.pi/2 (lined up with the Phase 3 knot-hole entry on +Z).
+	local angle = math.pi / 2 + 1.65 * math.pi
+	angle = section_NarrowJumps     (folder, center, coinsFolder, yStart,      yStart + 12, angle)
+	angle = section_Ladder          (folder, center, coinsFolder, yStart + 12, yStart + 20, angle, 2)
+	angle = section_WallJump        (folder, center, coinsFolder, yStart + 20, yStart + 34, angle, 2)
+	angle = section_Ladder          (folder, center, coinsFolder, yStart + 34, yStart + 42, angle, 2)
+	angle = section_CrumblePendulum (folder, center, coinsFolder, yStart + 42, yStart + 56, angle)
+	angle = section_Ladder          (folder, center, coinsFolder, yStart + 56, yStart + 64, angle, 2)
+	angle = section_TripleSwing     (folder, center, coinsFolder, yStart + 64, yStart + 74, angle)
+	angle = section_Ladder          (folder, center, coinsFolder, yStart + 74, yStart + 78, angle, 2)
+
+	-- KnotApproach takes its end angle as the destination (math.pi/2 +
+	-- 2π for a full extra turn so the spiral keeps wrapping rather than
+	-- snapping back).
+	local knotApproachEndAngle = math.pi / 2 + 2 * math.pi
+	section_KnotApproach(folder, center, coinsFolder, yStart + 78, yEnd - 4, knotApproachEndAngle)
+
+	-- Vine truss carrying the player from the final approach branch up
+	-- to the Phase 3 knot-hole entry at Y=164. Same connector the legacy
+	-- phase used; preserves the inside-the-trunk transition.
+	local approachEndPos = ringPos(center, 30, knotApproachEndAngle, yEnd - 4)
+	local vineTopY = yEnd + 4
+	local vine = Instance.new("TrussPart")
+	vine.Name = "Phase2To3Vine"
+	vine.Anchored = true
+	vine.Size = Vector3.new(2, vineTopY - approachEndPos.Y, 2)
+	vine.Position = Vector3.new(approachEndPos.X, (approachEndPos.Y + vineTopY) / 2, approachEndPos.Z)
+	vine.Style = Enum.Style.NoSupports
+	vine.Color = Color3.fromRGB(95, 115, 60)
+	vine.Parent = folder
+
+	local vineTop = newPart({
+		Name = "Phase2Top",
+		Size = Vector3.new(10, 1, 8),
+		Position = Vector3.new(approachEndPos.X, vineTopY, approachEndPos.Z - 2),
+		Color = Color3.fromRGB(120, 80, 50),
+	})
+	vineTop:SetAttribute("IsCheckpoint", true)
+	vineTop.Parent = folder
+end
+
 ------------------------------------------------------------
 -- Phase 3 — Rotting Core (interior)
 -- Enter the trunk via a knot. Interior spiral of glowing mushrooms, with a
@@ -1330,22 +1961,7 @@ local function buildPhase3(parent: Instance)
 		-- Rotting-core dressing: stem, gills, spots, spore flecks, hue variation.
 		decorPhase3Mushroom(cap, i, angle, folder)
 
-		-- Aligned glowing coin above odd-indexed mushrooms.
-		if coinsFolderMushroom and i % 2 == 1 then
-			local coin = newPart({
-				Name = "Coin",
-				Size = Vector3.new(2, 2, 0.4),
-				CFrame = CFrame.new(pos + Vector3.new(0, 3, 0))
-					* CFrame.Angles(0, angle, math.rad(90)),
-				Shape = Enum.PartType.Cylinder,
-				Material = Enum.Material.Neon,
-				Color = Color3.fromRGB(255, 210, 60),
-				CanCollide = false,
-			})
-			coin:SetAttribute("Value", Config.Map.CoinValue)
-			coin:SetAttribute("Phase", 3)
-			coin.Parent = coinsFolderMushroom
-		end
+		-- Physical coin pickups removed — coins come from glide distance only.
 	end
 
 	-- Sap conveyor: a short frictionless slide tucked to one side. Optional
@@ -1379,12 +1995,14 @@ local function buildPhase3(parent: Instance)
 			Name = "SporeBeam_" .. i,
 			Size = Vector3.new(Config.Map.TreeTrunkRadius * 1.6, 1, 1),
 			Position = center + Vector3.new(0, yEnd - 12 - i * 5, 0),
-			Material = Enum.Material.Neon,
-			Color = Color3.fromRGB(140, 220, 90),
+			Color = Color3.fromRGB(245, 250, 255),
 			Transparency = 0.3,
 			CanCollide = false,
 		})
 		beam:SetAttribute("SporeBeam", true)
+		-- Spore beams kill on touch → neon white.
+		beam.Material = Enum.Material.Neon
+		beam.Color = Color3.fromRGB(245, 250, 255)
 		beam:SetAttribute("SpinSpeed", 0.8 + i * 0.4)
 		beam.Parent = folder
 
@@ -1509,23 +2127,7 @@ local function buildPhase4(parent: Instance)
 		-- Apex-crown dressing: upward crystal spikes + soft blue glow.
 		decorPhase4Ice(ice, i, angle, folder)
 
-		-- Aligned coin above every other ice step (skip first/last to avoid
-		-- clipping through the speed pad / exit landing).
-		if coinsFolder and i > 0 and i < count - 1 and i % 2 == 1 then
-			local coin = newPart({
-				Name = "Coin",
-				Size = Vector3.new(2, 2, 0.4),
-				CFrame = CFrame.new(pos + Vector3.new(0, 3, 0))
-					* CFrame.Angles(0, angle, math.rad(90)),
-				Shape = Enum.PartType.Cylinder,
-				Material = Enum.Material.Neon,
-				Color = Color3.fromRGB(255, 210, 60),
-				CanCollide = false,
-			})
-			coin:SetAttribute("Value", Config.Map.CoinValue)
-			coin:SetAttribute("Phase", 4)
-			coin.Parent = coinsFolder
-		end
+		-- Physical coin pickups removed — coins come from glide distance only.
 	end
 
 	-- Speed pad sits just above the spiral's final step (angle 3π/2, -Z side).
@@ -1569,27 +2171,105 @@ local function buildPhase4(parent: Instance)
 end
 
 ------------------------------------------------------------
--- Canopy foliage (decorative)
+-- Base ring (replaces the old root flares for the ToH tower). A single
+-- thicker disc sitting flush at Y=0, color-matched to Phase 1 so the
+-- bottom reads as the tower's foundation. No root cylinders — neon
+-- towers don't have organic bark roots, that was tree-specific.
+------------------------------------------------------------
+local function buildRoots(parent: Instance)
+	local folder = Instance.new("Folder")
+	folder.Name = "BaseRing"
+	folder.Parent = parent
+
+	local center = Config.Map.TreeCenter
+	local r = Config.Map.TreeTrunkRadius
+
+	-- A flat disc 5 studs wider than the trunk, 2 studs tall, sitting
+	-- centered on Y=1 so the top is at Y=2 (just above the spawn pad).
+	-- Same red as Phase 1 so it reads as the tower's plinth.
+	local ring = newPart({
+		Name = "BaseDisc",
+		Size = Vector3.new(2, (r + 5) * 2, (r + 5) * 2),
+		Shape = Enum.PartType.Cylinder,
+		CFrame = CFrame.new(center + Vector3.new(0, 1, 0))
+			* CFrame.Angles(0, 0, math.rad(90)),
+		Color = PHASE_COLORS[1],
+		CanCollide = true,
+	})
+	ring.Parent = folder
+end
+
+------------------------------------------------------------
+-- Summit podium. Replaces the leafy canopy. A small white-glowing
+-- platform with a neon rainbow ring around its rim — the player's
+-- reward for reaching the top, and the launch point for the glide.
+-- Just three parts: a white disc, a neon torus-style ring (six color
+-- segments), and a glowing core dome on top.
 ------------------------------------------------------------
 local function buildCanopy(parent: Instance)
-	for i = 1, 6 do
-		local angle = (i / 6) * math.pi * 2
-		local radius = 80
-		local leaf = newPart({
-			Name = "CanopyLeaf_" .. i,
-			Size = Vector3.new(110, 80, 110),
-			Position = Config.Map.TreeCenter + Vector3.new(
-				math.cos(angle) * radius,
-				Config.Map.TreeHeight + 40,
-				math.sin(angle) * radius
-			),
-			Shape = Enum.PartType.Ball,
-			Material = Enum.Material.Grass,
-			Color = Color3.fromRGB(55, 115, 50),
+	local folder = Instance.new("Folder")
+	folder.Name = "Summit"
+	folder.Parent = parent
+
+	local center = Config.Map.TreeCenter
+	local treeTop = Config.Map.TreeHeight   -- 340
+
+	-- Main podium disc — bright white, sits directly on top of Phase 4.
+	-- 60 studs wide (tripled from 32) so it reads clearly as the
+	-- "trophy summit" from the spawn point and from the floating
+	-- tutorial island.
+	local podium = newPart({
+		Name = "SummitPodium",
+		Size = Vector3.new(3, 60, 60),
+		Shape = Enum.PartType.Cylinder,
+		CFrame = CFrame.new(center + Vector3.new(0, treeTop + 1.5, 0))
+			* CFrame.Angles(0, 0, math.rad(90)),
+		Color = Color3.fromRGB(245, 248, 255),
+		CanCollide = true,
+	})
+	podium.Parent = folder
+
+	-- Rainbow rim — 6 small cylinders arranged around the podium's
+	-- circumference, each a different neon color. Rolls all the floor
+	-- colors back into one place at the top: a "you climbed all of
+	-- this" trophy ring.
+	local rimColors = {
+		Color3.fromRGB(230, 60, 60),
+		Color3.fromRGB(255, 140, 40),
+		Color3.fromRGB(255, 215, 60),
+		Color3.fromRGB(60, 210, 90),
+		Color3.fromRGB(80, 140, 255),
+		Color3.fromRGB(150, 95, 240),
+	}
+	local rimSegmentCount = 30
+	local rimR = 30   -- tripled from 16 to ring the bigger podium
+	for i = 0, rimSegmentCount - 1 do
+		local ang = (i / rimSegmentCount) * math.pi * 2
+		local seg = newPart({
+			Name = "SummitRim_" .. i,
+			Size = Vector3.new(2.4, 2.4, 2.4),
+			Shape = Enum.PartType.Cylinder,
+			CFrame = CFrame.new(center + Vector3.new(math.cos(ang) * rimR, treeTop + 3.6, math.sin(ang) * rimR))
+				* CFrame.Angles(0, math.pi / 2 - ang, 0),
+			Color = rimColors[(i % #rimColors) + 1],
 			CanCollide = false,
+			CastShadow = false,
 		})
-		leaf.Parent = parent
+		seg.Parent = folder
 	end
+
+	-- Central glow dome — half-sphere on top of the podium, emissive
+	-- via Neon material override (ignored by the helper's Plastic
+	-- override; we set it explicitly here so the summit pops).
+	local core = newPart({
+		Name = "SummitCore",
+		Size = Vector3.new(10, 10, 10),
+		Shape = Enum.PartType.Ball,
+		Position = center + Vector3.new(0, treeTop + 6, 0),
+		Color = Color3.fromRGB(255, 255, 255),
+		CanCollide = false,
+	})
+	core.Parent = folder
 end
 
 ------------------------------------------------------------
@@ -1669,14 +2349,15 @@ function MapBuilder.build(): Folder
 	ensureCoinsFolder(map)
 
 	buildGroundAndSpawn(map)
-	buildPracticeCliff(map)
+	buildTutorialIsland(map)
 	buildTrunk(map)
+	buildRoots(map)               -- flared roots at base — anchors silhouette
 	buildTreeEntry(map)
-	buildPhase1(map)
+	buildPhase1(map)              -- climbable branches sticking radially from trunk
 	buildPhase2(map)
 	buildPhase3(map)
 	buildPhase4(map)
-	buildCanopy(map)
+	buildCanopy(map)              -- chunky 17-sphere foliage crown
 	buildAtmosphere(map)
 
 	print("[MapBuilder] World built. Jump branch @ Y =", Config.Map.JumpBranchHeight)
