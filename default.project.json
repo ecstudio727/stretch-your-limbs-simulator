@@ -1,0 +1,69 @@
+{
+  "name": "StretchYourLimbsSimulator",
+  "tree": {
+    "$className": "DataModel",
+
+    "ReplicatedStorage": {
+      "$className": "ReplicatedStorage",
+      "Shared": {
+        "$path": "src/shared"
+      }
+    },
+
+    "ServerScriptService": {
+      "$className": "ServerScriptService",
+      "Server": {
+        "$path": "src/server"
+      }
+    },
+
+    "StarterPlayer": {
+      "$className": "StarterPlayer",
+      "StarterPlayerScripts": {
+        "$className": "StarterPlayerScripts",
+        "Client": {
+          "$path": "src/client"
+        }
+      }
+    },
+
+    "Workspace": {
+      "$className": "Workspace",
+      "$properties": {
+        "FilteringEnabled": true,
+        "Gravity": 150
+      }
+    },
+
+    "Lighting": {
+      "$className": "Lighting",
+      "$properties": {
+        "Ambient": [0.18, 0.22, 0.16],
+        "OutdoorAmbient": [0.32, 0.40, 0.28],
+        "Brightness": 2.2,
+        "ClockTime": 11,
+        "FogColor": [0.55, 0.63, 0.50],
+        "FogEnd": 3500,
+        "FogStart": 600,
+        "Technology": "Future",
+        "EnvironmentDiffuseScale": 0.4,
+        "EnvironmentSpecularScale": 0.3,
+        "GlobalShadows": true
+      }
+    },
+
+    "SoundService": {
+      "$className": "SoundService",
+      "$properties": {
+        "RespectFilteringEnabled": true
+      }
+    },
+
+    "HttpService": {
+      "$className": "HttpService",
+      "$properties": {
+        "HttpEnabled": true
+      }
+    }
+  }
+}

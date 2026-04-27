@@ -1,0 +1,14 @@
+# Rojo / Roblox build output
+*.rbxl
+*.rbxlx
+*.rbxm
+*.rbxmx
+
+# Editor
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Rojo sourcemap
+sourcemap.json
