@@ -1,6 +1,18 @@
 --!strict
 -- Main.server.lua
--- Entry point. Builds the map first so it always appears, then wires services.
+-- OWNER: PARTNER (boot order, service wiring).
+--
+-- Entry point. Builds the map first so it always appears, then wires
+-- services. Each service is loaded with safeRequire so a single bad
+-- module never blocks boot.
+--
+-- Folder layout (under ServerScriptService.Server):
+--   Map/          OWEN    — MapBuilder
+--   Data/         PARTNER — PlayerDataService
+--   Progression/  PARTNER — Shop, Rebirth, Pet, Leaderboard
+--   Gameplay/     PARTNER — Glide, Coin, Hazard, Checkpoint
+--   Onboarding/   PARTNER — Tutorial
+--   Monetization/ PARTNER — (empty: game-passes / dev products go here)
 
 local ServerScriptService = game:GetService("ServerScriptService")
 local Server = ServerScriptService:WaitForChild("Server")
@@ -9,28 +21,47 @@ require(game:GetService("ReplicatedStorage"):WaitForChild("Shared"):WaitForChild
 
 print("[Main] Booting Stretch Your Limbs Simulator...")
 
--- Build the map FIRST so it appears even if any service fails later.
-local MapBuilder = require(Server:WaitForChild("MapBuilder"))
+------------------------------------------------------------
+-- Map first so the world appears even if a service fails later.
+------------------------------------------------------------
+local MapFolder = Server:WaitForChild("Map")
+local MapBuilder = require(MapFolder:WaitForChild("MapBuilder"))
 MapBuilder.build()
 
-local function safeRequire(name: string)
-	local ok, result = pcall(require, Server:WaitForChild(name))
+------------------------------------------------------------
+-- safeRequire(folderName, moduleName) — never throws.
+------------------------------------------------------------
+local function safeRequire(folderName: string, moduleName: string)
+	local folder = Server:FindFirstChild(folderName)
+	if not folder then
+		warn(("[Main] folder %s missing"):format(folderName))
+		return nil
+	end
+	local module = folder:FindFirstChild(moduleName)
+	if not module then
+		warn(("[Main] module %s/%s missing"):format(folderName, moduleName))
+		return nil
+	end
+	local ok, result = pcall(require, module)
 	if ok then return result end
-	warn(("[Main] failed to load %s: %s"):format(name, tostring(result)))
+	warn(("[Main] failed to load %s/%s: %s"):format(folderName, moduleName, tostring(result)))
 	return nil
 end
 
-local PlayerDataService  = safeRequire("PlayerDataService")
-local GlideService       = safeRequire("GlideService")
-local CoinService        = safeRequire("CoinService")
-local ShopService        = safeRequire("ShopService")
-local RebirthService     = safeRequire("RebirthService")
-local PetService         = safeRequire("PetService")
-local LeaderboardService = safeRequire("LeaderboardService")
-local HazardService      = safeRequire("HazardService")
-local CheckpointService  = safeRequire("CheckpointService")
-local TutorialService    = safeRequire("TutorialService")
+local PlayerDataService  = safeRequire("Data",        "PlayerDataService")
+local GlideService       = safeRequire("Gameplay",    "GlideService")
+local CoinService        = safeRequire("Gameplay",    "CoinService")
+local HazardService      = safeRequire("Gameplay",    "HazardService")
+local CheckpointService  = safeRequire("Gameplay",    "CheckpointService")
+local ShopService        = safeRequire("Progression", "ShopService")
+local RebirthService     = safeRequire("Progression", "RebirthService")
+local PetService         = safeRequire("Progression", "PetService")
+local LeaderboardService = safeRequire("Progression", "LeaderboardService")
+local TutorialService    = safeRequire("Onboarding",  "TutorialService")
 
+------------------------------------------------------------
+-- Init wiring. Each call is wrapped so one failure doesn't cascade.
+------------------------------------------------------------
 local function safeCall(label: string, fn: () -> ())
 	local ok, err = pcall(fn)
 	if not ok then warn(("[Main] %s init failed: %s"):format(label, tostring(err))) end
