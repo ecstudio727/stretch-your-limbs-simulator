@@ -79,15 +79,20 @@ bannerObjective.Parent = banner
 -- Visual 96x36, hitbox 120x48 (Fitts's Law), slightly dimmed so it
 -- doesn't compete with the objective banner.
 ------------------------------------------------------------
+-- Icon-only square button (44×44 visual, padded hitbox). The icon key
+-- falls back to the "SKIP" word if the asset ID is ever missing from
+-- Icons.lua, so the button stays meaningful no matter what.
 local skipOuter, skipInner = UI.newButton({
-	Text = "SKIP",
+	Text = "",
 	Color = UI.Colors.SurfaceSoft,
-	TextColor = UI.Colors.TextMuted,
-	Visual = Vector2.new(72, 32),
-	Hitbox = Vector2.new(96, 44),
-	TextSize = UI.TextSize.Micro,
-	Font = UI.Font.Bold,
+	Visual = Vector2.new(44, 44),
+	Hitbox = Vector2.new(56, 56),
 })
+local skipIcon = UI.newIcon("Skip", 22, "SKIP")
+skipIcon.AnchorPoint = Vector2.new(0.5, 0.5)
+skipIcon.Position = UDim2.new(0.5, 0, 0.5, 0)
+skipIcon.Parent = skipInner
+
 skipOuter.AnchorPoint = Vector2.new(0, 0.5)
 skipOuter.Position = UDim2.new(0, UI.Size.Margin, 0.5, 0)
 skipOuter.Visible = false

@@ -41,21 +41,10 @@ coinsChip.Parent = screen
 UI.addPadding(coinsChip, 6)
 UI.addHorizontalList(coinsChip, 5)
 
--- Coin pip (pure Frame + UICorner + UIGradient — no external asset fetch).
-local coinPip = Instance.new("Frame")
-coinPip.Name = "Pip"
-coinPip.Size = UDim2.new(0, 16, 0, 16)
-coinPip.BackgroundColor3 = UI.Colors.Coin
-coinPip.BorderSizePixel = 0
+-- Coin pip — real asset via UI.newIcon. If the icon ID is ever stripped
+-- from Icons.lua, falls back to a "$" badge so the chip layout holds.
+local coinPip = UI.newIcon("Coin", 18, "$")
 coinPip.LayoutOrder = 1
-local pipCorner = Instance.new("UICorner"); pipCorner.CornerRadius = UDim.new(1, 0); pipCorner.Parent = coinPip
-local pipGrad = Instance.new("UIGradient")
-pipGrad.Color = ColorSequence.new({
-	ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 230, 120)),
-	ColorSequenceKeypoint.new(1, UI.Colors.CoinDeep),
-})
-pipGrad.Rotation = 90
-pipGrad.Parent = coinPip
 coinPip.Parent = coinsChip
 
 local coinsLabel = UI.newLabel("0", UI.TextSize.Body, UI.Colors.TextPrimary)
@@ -82,7 +71,10 @@ UI.addPadding(statsStrip, 4)
 local statsLayout = UI.addHorizontalList(statsStrip, 12)
 statsLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
 
-local function makeStatPair(captionText: string, order: number): (TextLabel, TextLabel)
+-- Each stat pair is icon (if available) + caption + value. The icon
+-- falls back to empty so missing art reads as text-only without a layout
+-- gap.
+local function makeStatPair(captionText: string, iconKey: string?, order: number): (TextLabel, TextLabel)
 	local group = Instance.new("Frame")
 	group.BackgroundTransparency = 1
 	group.Size = UDim2.new(0, 110, 1, 0)
@@ -91,24 +83,39 @@ local function makeStatPair(captionText: string, order: number): (TextLabel, Tex
 	local groupLayout = UI.addHorizontalList(group, 4)
 	groupLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
 
+	if iconKey then
+		-- tryIcon returns nil when the asset ID isn't in Icons.lua yet —
+		-- the slot collapses cleanly so missing art doesn't leave a gap.
+		-- Drop a real ID into Icons.lua and the icon appears next play.
+		local icon = UI.tryIcon(iconKey, 14)
+		if icon then
+			icon.LayoutOrder = 1
+			icon.Parent = group
+		end
+	end
+
 	local caption = UI.newLabel(captionText, UI.TextSize.Micro, UI.Colors.TextMuted)
 	caption.Size = UDim2.new(0, 0, 1, 0)
 	caption.AutomaticSize = Enum.AutomaticSize.X
-	caption.LayoutOrder = 1
+	caption.LayoutOrder = 2
 	caption.Parent = group
 
 	local value = UI.newLabel("0", UI.TextSize.Caption, UI.Colors.TextPrimary)
 	value.Size = UDim2.new(0, 0, 1, 0)
 	value.AutomaticSize = Enum.AutomaticSize.X
-	value.LayoutOrder = 2
+	value.LayoutOrder = 3
 	value.Parent = group
 
 	group.Parent = statsStrip
 	return caption, value
 end
 
-local _, rebirthsValue = makeStatPair("REBIRTHS", 1)
-local _, bestGlideValue = makeStatPair("BEST", 2)
+local _, rebirthsValue = makeStatPair("REBIRTHS", "Rebirth", 1)
+local _, bestGlideValue = makeStatPair("BEST", "BestGlide", 2)
+
+-- Slide-fade-in entrance for both top chips on first appearance.
+UI.attachAppearFx(coinsChip, { fromYOffset = -10, duration = 0.28 })
+UI.attachAppearFx(statsStrip, { fromYOffset = -10, duration = 0.28, delay = 0.06 })
 
 ------------------------------------------------------------
 -- Toast notifications. Appears below the stats strip so it never intrudes

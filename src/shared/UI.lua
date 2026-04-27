@@ -27,7 +27,12 @@ local GuiService = game:GetService("GuiService")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 
+local Icons = require(script.Parent:WaitForChild("Icons"))
+
 local UI = {}
+
+-- Re-export the raw icon table so callers can read it without a second require.
+UI.Icons = Icons
 
 ------------------------------------------------------------
 -- Palette
@@ -190,6 +195,9 @@ end
 
 -- Primary action button. The visible rect is `visual`; the clickable rect is
 -- padded out to `hitbox` so off-center taps still register (Fitts's Law).
+-- Hover/press animation is delegated to UI.attachHoverFx so every button in
+-- the codebase shares the same crisp motion (UIScale-driven, idempotent,
+-- ReducedMotion-aware).
 function UI.newButton(opts: {
 	Text: string,
 	Color: Color3?,
@@ -229,40 +237,171 @@ function UI.newButton(opts: {
 	stroke.Transparency = 0.4
 	stroke.Parent = inner
 
-	local label = UI.newLabel(opts.Text, opts.TextSize or UI.TextSize.Baseline, opts.TextColor or UI.Colors.TextPrimary)
-	label.Size = UDim2.new(1, -12, 1, 0)
-	label.Position = UDim2.new(0, 6, 0, 0)
-	label.TextXAlignment = Enum.TextXAlignment.Center
-	label.Font = opts.Font or UI.Font.Black
-	label.Parent = inner
+	-- Only insert a label if Text is non-empty. Icon-only buttons (rail
+	-- toggles, glide button once art lands) skip this and parent their
+	-- own ImageLabel into `inner` instead.
+	if opts.Text and opts.Text ~= "" then
+		local label = UI.newLabel(opts.Text, opts.TextSize or UI.TextSize.Baseline, opts.TextColor or UI.Colors.TextPrimary)
+		label.Size = UDim2.new(1, -12, 1, 0)
+		label.Position = UDim2.new(0, 6, 0, 0)
+		label.TextXAlignment = Enum.TextXAlignment.Center
+		label.Font = opts.Font or UI.Font.Black
+		label.Parent = inner
+	end
 
-	-- Pulse on press (subject to ReducedMotion).
-	outer.MouseButton1Down:Connect(function()
-		if UI.isReducedMotion() then return end
-		UI.tween(inner, TweenInfo.new(0.08, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
-			{ Size = UDim2.new(0, visual.X - 6, 0, visual.Y - 4) })
-	end)
-	outer.MouseButton1Up:Connect(function()
-		UI.tween(inner, TweenInfo.new(0.12, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
-			{ Size = UDim2.new(0, visual.X, 0, visual.Y) })
-	end)
-	outer.MouseLeave:Connect(function()
-		UI.tween(inner, TweenInfo.new(0.12), { Size = UDim2.new(0, visual.X, 0, visual.Y) })
-	end)
-
+	UI.attachHoverFx(outer, inner)
 	return outer, inner
 end
 
--- Simple icon-only round button (for right-rail toggles).
-function UI.newIconButton(text: string, color: Color3): (TextButton, Frame)
+-- Returns an ImageLabel for `key` or nil if no asset is registered yet.
+-- Use this when missing art should leave no layout slot at all (e.g. an
+-- optional stat-row icon). For meaningful text fallbacks (a button label),
+-- use UI.newIcon instead.
+function UI.tryIcon(key: string, sizePx: number): ImageLabel?
+	local id = Icons[key]
+	if not id then return nil end
+	local img = Instance.new("ImageLabel")
+	img.Name = "Icon_" .. key
+	img.BackgroundTransparency = 1
+	img.Size = UDim2.new(0, sizePx, 0, sizePx)
+	img.Image = id
+	img.ScaleType = Enum.ScaleType.Fit
+	return img
+end
+
+-- Returns a GuiObject sized `sizePx × sizePx`. If the icon key has a real
+-- asset ID an ImageLabel is returned; otherwise a TextLabel showing the
+-- fallback text (or the first 2 letters of the key) so layout doesn't shift
+-- as art is added incrementally.
+function UI.newIcon(key: string, sizePx: number, fallbackText: string?): GuiObject
+	local id = Icons[key]
+	if id then
+		local img = Instance.new("ImageLabel")
+		img.Name = "Icon_" .. key
+		img.BackgroundTransparency = 1
+		img.Size = UDim2.new(0, sizePx, 0, sizePx)
+		img.Image = id
+		img.ScaleType = Enum.ScaleType.Fit
+		return img
+	end
+	local txt = Instance.new("TextLabel")
+	txt.Name = "IconFallback_" .. key
+	txt.BackgroundTransparency = 1
+	txt.Size = UDim2.new(0, sizePx, 0, sizePx)
+	txt.Text = fallbackText or string.upper(string.sub(key, 1, 2))
+	txt.TextColor3 = UI.Colors.TextMuted
+	txt.Font = UI.Font.Black
+	txt.TextScaled = true
+	txt.TextWrapped = false
+	return txt
+end
+
+-- Right-rail icon button. 44×44 visual rect, 48×48 hitbox, real icon
+-- centered inside (or fallback text). Drop-in replacement for the
+-- previous text-only newIconButton.
+function UI.newRailButton(opts: {
+	Icon: string,
+	Fallback: string?,
+	Color: Color3?,
+	IconSize: number?,
+}): (TextButton, Frame)
+	local outer, inner = UI.newButton({
+		Text = "",
+		Color = opts.Color or UI.Colors.SurfaceHot,
+		Visual = UI.Size.IconButton,
+		Hitbox = Vector2.new(48, 48),
+	})
+	local icon = UI.newIcon(opts.Icon, opts.IconSize or 28, opts.Fallback)
+	icon.AnchorPoint = Vector2.new(0.5, 0.5)
+	icon.Position = UDim2.new(0.5, 0, 0.5, 0)
+	icon.Parent = inner
+	return outer, inner
+end
+
+-- Legacy-shape wrapper kept so older calls keep compiling. Prefer
+-- newRailButton when adding new code so icon keys stay searchable.
+function UI.newIconButton(textOrKey: string, color: Color3): (TextButton, Frame)
+	if Icons[textOrKey] then
+		return UI.newRailButton({ Icon = textOrKey, Color = color })
+	end
 	return UI.newButton({
-		Text = text,
+		Text = textOrKey,
 		Color = color,
 		Visual = UI.Size.IconButton,
 		Hitbox = Vector2.new(48, 48),
 		TextSize = UI.TextSize.Micro,
 		Font = UI.Font.Bold,
 	})
+end
+
+------------------------------------------------------------
+-- Motion helpers. Centralized so every button in the game shares the
+-- exact same hover/press feel — change the timings here once and the
+-- whole UI updates.
+------------------------------------------------------------
+
+-- Standard hover + press behavior driven by a single UIScale on the inner.
+-- Tracks hover/press state independently so press-then-leave doesn't strand
+-- the button at scale 0.94. Idempotent guard prevents double-attach.
+function UI.attachHoverFx(outer: GuiButton, inner: GuiObject?)
+	if outer:GetAttribute("HoverFxAttached") then return end
+	outer:SetAttribute("HoverFxAttached", true)
+
+	local target = inner or outer
+	local scale = target:FindFirstChildWhichIsA("UIScale")
+	if not scale then
+		scale = Instance.new("UIScale")
+		scale.Scale = 1
+		scale.Parent = target
+	end
+	local stroke = target:FindFirstChildWhichIsA("UIStroke")
+	local origStrokeT = stroke and stroke.Transparency or 0
+
+	local hovered = false
+	local pressed = false
+
+	local function refresh()
+		local s = 1.0
+		if pressed then s = 0.94
+		elseif hovered then s = 1.06 end
+		UI.tween(scale, TweenInfo.new(
+			pressed and 0.06 or 0.16,
+			Enum.EasingStyle.Quad,
+			Enum.EasingDirection.Out
+		), { Scale = s })
+		if stroke then
+			UI.tween(stroke, TweenInfo.new(0.16, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+				Transparency = (hovered or pressed) and math.max(0, origStrokeT - 0.4) or origStrokeT,
+			})
+		end
+	end
+
+	outer.MouseEnter:Connect(function() hovered = true; refresh() end)
+	outer.MouseLeave:Connect(function() hovered = false; pressed = false; refresh() end)
+	outer.MouseButton1Down:Connect(function() pressed = true; refresh() end)
+	outer.MouseButton1Up:Connect(function() pressed = false; refresh() end)
+end
+
+-- Slide-up + fade-in entrance. Call after parenting the frame to its
+-- ScreenGui. Cheap (one tween) and ReducedMotion-safe.
+function UI.attachAppearFx(frame: GuiObject, options: { fromYOffset: number?, duration: number?, delay: number? }?)
+	if UI.isReducedMotion() then return end
+	options = options or {}
+	local fromY = options.fromYOffset or 8
+	local dur = options.duration or 0.22
+	local delay = options.delay or 0
+
+	local origPos = frame.Position
+	local origBgT = frame.BackgroundTransparency
+	frame.Position = origPos + UDim2.fromOffset(0, fromY)
+	frame.BackgroundTransparency = 1
+
+	task.delay(delay, function()
+		if not frame.Parent then return end
+		UI.tween(frame,
+			TweenInfo.new(dur, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
+			{ Position = origPos, BackgroundTransparency = origBgT })
+	end)
 end
 
 ------------------------------------------------------------

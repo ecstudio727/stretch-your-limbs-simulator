@@ -53,16 +53,28 @@ rail.Parent = screen
 local railLayout = UI.addVerticalList(rail, 6)
 railLayout.HorizontalAlignment = Enum.HorizontalAlignment.Right
 
-local function makeRailButton(label: string, color: Color3, order: number): TextButton
-	local outer, _ = UI.newIconButton(label, color)
+-- Each rail entry takes an icon key plus a fallback label. UI.newRailButton
+-- centers the icon inside a 44×44 button and falls back to the label text
+-- if the icon ID is missing from Icons.lua.
+local function makeRailButton(iconKey: string, fallback: string, color: Color3, order: number): TextButton
+	local outer, _ = UI.newRailButton({
+		Icon = iconKey,
+		Fallback = fallback,
+		Color = color,
+	})
 	outer.LayoutOrder = order
 	outer.Parent = rail
 	return outer
 end
 
-local btnShop = makeRailButton("SHOP", UI.Colors.SurfaceHot, 1)
-local btnLeaderboard = makeRailButton("TOP", UI.Colors.SurfaceHot, 2)
-local btnRebirth = makeRailButton("REBIRTH", UI.Colors.Rebirth, 3)
+local btnShop        = makeRailButton("Shop",        "SHOP", UI.Colors.SurfaceHot, 1)
+local btnLeaderboard = makeRailButton("Leaderboard", "TOP",  UI.Colors.SurfaceHot, 2)
+local btnRebirth     = makeRailButton("Rebirth",     "REB",  UI.Colors.Rebirth,    3)
+
+-- Slide-in entrance for the rail buttons (staggered for a small flourish).
+UI.attachAppearFx(btnShop,        { fromYOffset = 12, duration = 0.30, delay = 0.00 })
+UI.attachAppearFx(btnLeaderboard, { fromYOffset = 12, duration = 0.30, delay = 0.06 })
+UI.attachAppearFx(btnRebirth,     { fromYOffset = 12, duration = 0.30, delay = 0.12 })
 
 ------------------------------------------------------------
 -- Drawer (right-side sliding panel). A single Frame that swaps contents
