@@ -5,7 +5,7 @@ Both client and server require these modules. Treat as the public API.
 | File                  | Owner    | Purpose                                  |
 | --------------------- | -------- | ---------------------------------------- |
 | `Config/init.lua`     | JOINT    | Merges Gameplay + Map; helper functions. |
-| `Config/Gameplay.lua` | PARTNER  | Movement, glide, shop, rebirth, pets, data, tutorial, leaderboard. |
+| `Config/Gameplay.lua` | RUBEN  | Movement, glide, shop, rebirth, pets, data, tutorial, leaderboard. |
 | `Config/Map.lua`      | OWEN     | Tree, phases, cliff, coin value.         |
 | `Remotes.lua`         | JOINT    | RemoteEvent / RemoteFunction definitions. |
 | `Util.lua`            | JOINT    | Small helpers (deepCopy, formatNumber, horizontalDistance). |

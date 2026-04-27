@@ -5,7 +5,7 @@ Each `.client.lua` file is a LocalScript that auto-runs on player join.
 | Subfolder    | Owner   | Files                                                    |
 | ------------ | ------- | -------------------------------------------------------- |
 | `UI/`        | OWEN    | `HUD`, `ShopUI`, `TutorialController` — all peripheral UI. |
-| `Gameplay/`  | PARTNER | `GlideController` — glide physics + own glide button + distance card. |
+| `Gameplay/`  | RUBEN | `GlideController` — glide physics + own glide button + distance card. |
 | (root)       | JOINT   | `Main.client.lua` — boot log only.                       |
 
 The glide controller draws its own UI alongside its physics. If Owen

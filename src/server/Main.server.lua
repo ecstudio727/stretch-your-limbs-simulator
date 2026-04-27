@@ -1,6 +1,6 @@
 --!strict
 -- Main.server.lua
--- OWNER: PARTNER (boot order, service wiring).
+-- OWNER: RUBEN (boot order, service wiring).
 --
 -- Entry point. Builds the map first so it always appears, then wires
 -- services. Each service is loaded with safeRequire so a single bad
@@ -8,11 +8,11 @@
 --
 -- Folder layout (under ServerScriptService.Server):
 --   Map/          OWEN    — MapBuilder
---   Data/         PARTNER — PlayerDataService
---   Progression/  PARTNER — Shop, Rebirth, Pet, Leaderboard
---   Gameplay/     PARTNER — Glide, Coin, Hazard, Checkpoint
---   Onboarding/   PARTNER — Tutorial
---   Monetization/ PARTNER — (empty: game-passes / dev products go here)
+--   Data/         RUBEN — PlayerDataService
+--   Progression/  RUBEN — Shop, Rebirth, Pet, Leaderboard
+--   Gameplay/     RUBEN — Glide, Coin, Hazard, Checkpoint
+--   Onboarding/   RUBEN — Tutorial
+--   Monetization/ RUBEN — (empty: game-passes / dev products go here)
 
 local ServerScriptService = game:GetService("ServerScriptService")
 local Server = ServerScriptService:WaitForChild("Server")

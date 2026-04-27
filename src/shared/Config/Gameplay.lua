@@ -1,6 +1,6 @@
 --!strict
 -- Config/Gameplay.lua
--- OWNER: PARTNER (gameplay, monetization, progression).
+-- OWNER: RUBEN (gameplay, monetization, progression).
 --
 -- All tunings that affect how the game PLAYS — character speed, glide
 -- physics, shop economy, rebirth curve, pets, leaderboards, tutorial flow,

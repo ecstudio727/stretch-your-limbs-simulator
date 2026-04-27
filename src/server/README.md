@@ -5,11 +5,11 @@ and lifecycle.
 
 | Subfolder       | Owner    | Modules                                     |
 | --------------- | -------- | ------------------------------------------- |
-| `Data/`         | PARTNER  | `PlayerDataService` — profiles, DataStore, leaderstats. |
-| `Progression/`  | PARTNER  | `ShopService`, `RebirthService`, `PetService`, `LeaderboardService`. |
-| `Gameplay/`     | PARTNER  | `GlideService`, `CoinService`, `HazardService`, `CheckpointService`. |
-| `Onboarding/`   | PARTNER  | `TutorialService` — server-side FSM. |
-| `Monetization/` | PARTNER  | (empty — drop game-passes / dev products here). |
+| `Data/`         | RUBEN  | `PlayerDataService` — profiles, DataStore, leaderstats. |
+| `Progression/`  | RUBEN  | `ShopService`, `RebirthService`, `PetService`, `LeaderboardService`. |
+| `Gameplay/`     | RUBEN  | `GlideService`, `CoinService`, `HazardService`, `CheckpointService`. |
+| `Onboarding/`   | RUBEN  | `TutorialService` — server-side FSM. |
+| `Monetization/` | RUBEN  | (empty — drop game-passes / dev products here). |
 | `Map/`          | OWEN     | `MapBuilder` — procedural world build at boot. |
 
 `Main.server.lua` requires every module via the new

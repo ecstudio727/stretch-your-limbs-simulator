@@ -1,8 +1,8 @@
 # OWNERS
 
-Two-person split. Folders below are tagged so you can avoid editing the
-same files in parallel. Anything tagged **JOINT** is a shared interface —
-talk before changing.
+Two-person split (Owen + Ruben). Folders below are tagged so you can
+avoid editing the same files in parallel. Anything tagged **JOINT** is a
+shared interface — talk before changing.
 
 ## Owen — UI, visuals, map design
 
@@ -15,7 +15,7 @@ talk before changing.
 | `src/client/UI/ShopUI.client.lua`   | Right-rail buttons + sliding shop / leaderboard / rebirth drawer. |
 | `src/client/UI/TutorialController.client.lua` | Objective banner, 3D arrow, highlight, skip button. |
 
-## Partner — gameplay, monetization, everything else
+## Ruben — gameplay, monetization, everything else
 
 | Path                                              | What's in it                            |
 | ------------------------------------------------- | --------------------------------------- |
@@ -35,10 +35,9 @@ talk before changing.
 | `src/client/Gameplay/GlideController.client.lua`  | Glide physics + glide button + distance card. |
 
 > The glide controller is in `client/Gameplay` because the physics is
-> partner-owned, but it also draws its own UI (distance card + GLIDE
-> button). If Owen needs to retheme that UI in place it's a small,
-> documented section near the top of the file. Coordinate before
-> restructuring.
+> Ruben's, but it also draws its own UI (distance card + GLIDE button).
+> If Owen needs to retheme that UI in place it's a small, documented
+> section near the top of the file. Coordinate before restructuring.
 
 ## Joint — change carefully, ping each other
 
@@ -48,19 +47,18 @@ talk before changing.
 | `src/shared/Util.lua`         | Tiny helpers used everywhere.                         |
 | `src/shared/Config/init.lua`  | Re-exports the two sub-configs and hosts helper functions. Don't add data here — add to `Gameplay.lua` or `Map.lua`. |
 | `default.project.json`        | Rojo mount points. Only edit when you change the folder layout. |
-| `src/server/Main.server.lua`  | Listed under Partner above, but Owen will edit if a new map module needs to be required — small change, just mirror the existing pattern. |
+| `src/server/Main.server.lua`  | Listed under Ruben above, but Owen will edit if a new map module needs to be required — small change, just mirror the existing pattern. |
 | `src/client/Main.client.lua`  | Boot log only. Either of you can touch.               |
 
 ## Workflow tips
 
-1. **Branch per area.** `owen/<thing>` and `partner/<thing>`. As long as
+1. **Branch per area.** `owen/<thing>` and `ruben/<thing>`. As long as
    you each stay in your folders, merges are trivial.
 2. **Add, don't rename.** If you want a new tuning, add a key in your
-   own Config sub-module — don't relocate someone else's keys.
-3. **The Remotes file is the API.** When the partner needs a new
-   client→server signal, add it to `Remotes.lua` first, commit, then
-   each side wires its half. That's the only file you both touch on
-   the same change.
+   own Config sub-module — don't relocate the other person's keys.
+3. **The Remotes file is the API.** When Ruben needs a new client→server
+   signal, add it to `Remotes.lua` first, commit, then each side wires
+   its half. That's the only file you both touch on the same change.
 4. **MapBuilder is huge (1,686 lines) but cohesive.** If it starts
    causing merge conflicts, ask the assistant to split it into
    `Map/Phase1.lua` … `Phase4.lua` + `Map/Pieces.lua`.

@@ -1,9 +1,9 @@
 --!strict
 -- Config/init.lua
--- OWNER: JOINT (touch with care — both partners read this).
+-- OWNER: JOINT (touch with care — both Owen and Ruben read this).
 --
 -- This is the merged, public-facing Config table. Sub-modules:
---   * Gameplay.lua → PARTNER  (movement, glide, shop, rebirth, pets, data, tutorial, leaderboard)
+--   * Gameplay.lua → RUBEN  (movement, glide, shop, rebirth, pets, data, tutorial, leaderboard)
 --   * Map.lua      → OWEN     (tree dims, phase bands, coin value)
 --
 -- All callers continue to do `require(Shared.Config)` and read
